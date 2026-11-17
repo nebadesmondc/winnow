@@ -12,6 +12,7 @@ $script:WinnowProcessMap     = $null
 $script:WinnowUninstallCache = $null
 $script:WinnowRules          = $null
 $script:WinnowLastReport     = $null
+$script:WinnowWalk           = $null
 
 # Compiled once per session; a changed SpaceWalker.cs needs a new session.
 if (-not ('Winnow.SpaceWalker' -as [type])) {
@@ -24,9 +25,10 @@ $privateOrder = @(
     'Measure-Tree.ps1'  # sizing on top of the native walker
     'Interlock.ps1'     # running processes, in-flight updates, sentinel scan
     'Remove-Safely.ps1' # the ONLY delete primitive in the codebase
-    'Discovery.ps1'     # location resolution, install detection
-    'Detectors.ps1'     # generic detectors (H3, H4)
-    'Finding.ps1'       # the Finding, tiers, confidence
+    'Discovery.ps1'     # tool locations, installed programs
+    'Detectors.ps1'     # detectors that find items by name and layout
+    'Finding.ps1'       # findings and verdicts
+    'SpaceMap.ps1'      # drive walk and the space map
     'Format.ps1'        # console rendering
     'RuleEngine.ps1'    # rule loading and the scan pipeline
 )

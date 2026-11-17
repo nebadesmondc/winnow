@@ -23,65 +23,62 @@ $script:WinnowStateDirNames = @(
     'Default', 'databases', 'Session Storage'
 )
 
+# Never looked inside: installed packages can have folders with cache names.
+$script:WinnowPackageTreeNames = @('node_modules', 'site-packages', 'vendor')
+
 function Get-WinnowConventionalCacheCandidate {
     <#
     .SYNOPSIS
-    Finds cache directories by name in each app folder under %LOCALAPPDATA%
-    and %APPDATA%, up to MaxDepth levels deep. Never returns a state directory
-    or descends into a match.
+    Finds cache folders by name inside each app folder under %LOCALAPPDATA%
+    and %APPDATA%, from the drive walk. Never returns a state folder, a folder
+    inside another match, or anything inside an installed package.
     #>
     [CmdletBinding()]
-    param([int]$MaxDepth = 3)
+    param(
+        [object]$Walk = $script:WinnowWalk,
+        [int]$MaxDepth = 6
+    )
 
     $out = New-Object System.Collections.Generic.List[object]
-    $bases = @()
-    foreach ($b in @('LOCALAPPDATA', 'APPDATA')) {
-        $r = Get-WinnowEnvRoot -Base $b
-        if ($r) { $bases += $r }
-    }
+    if (-not $Walk) { return $out }
 
-    foreach ($base in $bases) {
-        foreach ($app in (Get-WinnowChildDirectory -Path $base)) {
+    $cacheNames = New-Object 'System.Collections.Generic.HashSet[string]' ([string[]]$script:WinnowCacheDirNames, [System.StringComparer]::OrdinalIgnoreCase)
+    $stateNames = New-Object 'System.Collections.Generic.HashSet[string]' ([string[]]$script:WinnowStateDirNames, [System.StringComparer]::OrdinalIgnoreCase)
+    $packageNames = New-Object 'System.Collections.Generic.HashSet[string]' ([string[]]$script:WinnowPackageTreeNames, [System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($b in @('LOCALAPPDATA', 'APPDATA')) {
+        $base = Get-WinnowEnvRoot -Base $b
+        if (-not $base) { continue }
+        $prefixLength = $base.TrimEnd('\').Length + 1
+
+        foreach ($d in $Walk.FoldersUnder($base)) {
+            $segments = $d.Path.Substring($prefixLength).Split('\')
+            if ($segments.Count -lt 2 -or $segments.Count -gt $MaxDepth + 1) { continue }
 
             # Temp has its own rule; Programs holds installations.
-            if ($app.Name -in @('Temp', 'Programs', 'Microsoft')) { continue }
+            if ($segments[0] -in @('Temp', 'Programs', 'Microsoft')) { continue }
 
-            $stack = New-Object System.Collections.Generic.Stack[object]
-            $stack.Push(@($app.Path, 1))
+            # A name on both lists counts as state.
+            $leaf = $segments[-1]
+            if (-not $cacheNames.Contains($leaf) -or $stateNames.Contains($leaf)) { continue }
 
-            while ($stack.Count -gt 0) {
-                $frame = $stack.Pop()
-                $dir = $frame[0]
-                $depth = [int]$frame[1]
-
-                foreach ($child in (Get-WinnowChildDirectory -Path $dir)) {
-
-                    $isState = $false
-                    foreach ($s in $script:WinnowStateDirNames) {
-                        if ($child.Name.Equals($s, [System.StringComparison]::OrdinalIgnoreCase)) { $isState = $true; break }
-                    }
-
-                    $isCache = $false
-                    foreach ($c in $script:WinnowCacheDirNames) {
-                        if ($child.Name.Equals($c, [System.StringComparison]::OrdinalIgnoreCase)) { $isCache = $true; break }
-                    }
-
-                    # A name on both lists counts as state.
-                    if ($isCache -and -not $isState) {
-                        $out.Add([pscustomobject]@{
-                            Path   = $child.Path
-                            Detail = "cache directory '$($child.Name)' belonging to '$($app.Name)'"
-                            Extra  = [pscustomobject]@{
-                                Title = "$($app.Name) - $($child.Name)"
-                            }
-                        })
-                        continue    # never descend into a directory we will remove
-                    }
-
-                    # State folders can hold caches (Service Worker\CacheStorage).
-                    if ($depth -lt $MaxDepth) { $stack.Push(@($child.Path, $depth + 1)) }
-                }
+            $inside = $false
+            for ($i = 0; $i -lt $segments.Count - 1; $i++) {
+                $s = $segments[$i]
+                if ($packageNames.Contains($s)) { $inside = $true; break }
+                if ($i -gt 0 -and $cacheNames.Contains($s) -and -not $stateNames.Contains($s)) { $inside = $true; break }
             }
+            if ($inside) { continue }
+
+            $app = $segments[0]
+            # Store apps: "5319275A.WhatsAppDesktop_cv1g1gvanyjgm" -> "WhatsAppDesktop"
+            if ($app -eq 'Packages' -and $segments[1] -match '^(?:[^.]+\.)?([^_]+)_') { $app = $Matches[1] }
+
+            $out.Add([pscustomobject]@{
+                Path   = $d.Path
+                Detail = "cache folder '$leaf' of $app"
+                Extra  = [pscustomobject]@{ Title = "$app - $leaf" }
+            })
         }
     }
     return $out

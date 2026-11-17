@@ -690,6 +690,32 @@ if ($env:CI) {
     }
 }
 
+Test-Case 'cache folders are found by name, never inside packages, state or another match' {
+    $base = Join-Path $sandbox 'appdata-local'
+    $roaming = Join-Path $sandbox 'appdata-roaming'
+    foreach ($d in @('Maker\App\Cache\inner\Cache', 'Maker\App\User Data\Default\Code Cache', 'Maker\App\Local Storage',
+                     'Tool\node_modules\pkg\cache', 'Temp\Cache', 'Packages\Pub.Thing_abc123\LocalCache\Cache')) {
+        [void](New-Item -ItemType Directory -Path (Join-Path $base $d) -Force)
+        Set-Content -LiteralPath (Join-Path (Join-Path $base $d) 'f.bin') -Value 'x' -Encoding ascii
+    }
+    [void](New-Item -ItemType Directory -Path $roaming -Force)
+    $saved = $env:LOCALAPPDATA, $env:APPDATA
+    try {
+        $env:LOCALAPPDATA = $base; $env:APPDATA = $roaming
+        $found = @(& $M {
+            param($b)
+            $w = [Winnow.SpaceWalker]::Walk((New-WinnowWalkOptions -Root $b -KeepMinBytes 0 -KeepDepth 20))
+            Get-WinnowConventionalCacheCandidate -Walk $w
+        } $base)
+    } finally {
+        $env:LOCALAPPDATA, $env:APPDATA = $saved
+    }
+    $rel = @($found | ForEach-Object { $_.Path.Substring($base.Length + 1) } | Sort-Object)
+    Assert-Equal 'Maker\App\Cache,Maker\App\User Data\Default\Code Cache,Packages\Pub.Thing_abc123\LocalCache\Cache' ($rel -join ',')
+    $titles = @($found | ForEach-Object { $_.Extra.Title })
+    Assert-True ($titles -contains 'Thing - Cache') "a Store app is not named by its package: $($titles -join ', ')"
+}
+
 Test-Case 'choosing a held-back item says why, not that it is missing' {
     $f = & $M {
         param($r)
@@ -720,6 +746,19 @@ Test-Case 'a scan produces a report and changes nothing' {
     Assert-True ($scan.Volumes.Count -ge 1) 'no volumes reported'
     Assert-True ($null -ne $scan.Findings) 'no findings collection'
     Assert-Equal 0 $scan.RuleErrors.Count "scan reported rule errors: $(($scan.RuleErrors | ForEach-Object { $_.RuleId + ': ' + $_.Message }) -join '; ')"
+}
+
+Write-Host ('  (walked {0:N0} files in {1} s; scan {2} s; {3:0}% of {4:0} GB used explained)' -f `
+    $scan.Walk.Files, $scan.Walk.Seconds, $scan.DurationSec, (100 * $scan.Map.ExplainedBytes / $scan.Map.UsedBytes), ($scan.Map.UsedBytes / 1GB)) -ForegroundColor DarkGray
+
+Test-Case 'the map places every measured byte once' {
+    $sum = 0
+    foreach ($f in $scan.Findings) { $sum += $f.Bytes }
+    foreach ($a in $scan.Map.Areas) { $sum += $a.Bytes }
+    $gap = [math]::Abs($sum - $scan.Map.ExplainedBytes)
+    Assert-True ($gap -lt 0.01 * $scan.Map.UsedBytes) ('items and areas add up to {0:N2} GB, the walk measured {1:N2} GB' -f ($sum / 1GB), ($scan.Map.ExplainedBytes / 1GB))
+    Assert-True ($scan.Map.ExplainedBytes -le $scan.Map.UsedBytes) 'the map explains more than is used'
+    Assert-True ($scan.Map.NotExplained.Bytes -ge 0) 'negative unexplained space'
 }
 
 Test-Case 'every path that could be removed is accepted by the guard' {

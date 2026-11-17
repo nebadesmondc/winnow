@@ -81,6 +81,16 @@ namespace Winnow
             return index.TryGetValue(path, out hit) ? hit : null;
         }
 
+        public List<DirSize> Children(string folder)
+        {
+            var list = new List<DirSize>();
+            var parent = Find(folder);
+            if (parent == null) return list;
+            foreach (var f in FoldersUnder(folder))
+                if (f.Depth == parent.Depth + 1) list.Add(f);
+            return list;
+        }
+
         public List<DirSize> FoldersUnder(string folder)
         {
             var prefix = folder.TrimEnd('\\') + "\\";

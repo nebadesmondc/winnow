@@ -81,7 +81,8 @@ function Import-WinnowRule {
 function Invoke-WinnowScan {
     <#
     .SYNOPSIS
-    Runs every enabled rule and returns a report object. Changes nothing.
+    Walks the system drive, runs every enabled rule and returns a report
+    object with the findings and the space map. Changes nothing.
     #>
     [CmdletBinding()]
     param(
@@ -94,6 +95,8 @@ function Invoke-WinnowScan {
 
     $runId = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4)
     $started = Get-Date
+    $driveRoot = Get-WinnowSystemDriveRoot
+    $walkTask = Start-WinnowDriveWalk -Root $driveRoot
 
     $rules = @(Import-WinnowRule)
     if ($RuleId) { $rules = @($rules | Where-Object { $RuleId -contains $_.Id }) }
@@ -104,23 +107,39 @@ function Invoke-WinnowScan {
     $rules = @(@($rules | Where-Object { -not $_.Discover }) + @($rules | Where-Object { $_.Discover }))
     $claimed = New-Object System.Collections.Generic.List[string]
 
+    $findings = New-Object System.Collections.Generic.List[object]
+    $ruleErrors = New-Object System.Collections.Generic.List[object]
+
+    # Tools are asked for their paths while the drive is walked.
+    $resolved = @{}
+    foreach ($rule in $rules) {
+        if ($rule.Discover) { continue }
+        if (-not $NoProgress) { Write-Progress -Activity 'Winnow' -Status "Asking tools: $($rule.Title)" }
+        try { $resolved[$rule.Id] = @(Get-WinnowRuleCandidate -Rule $rule) }
+        catch { $ruleErrors.Add([pscustomobject]@{ RuleId = $rule.Id; Message = $_.Exception.Message }) }
+    }
+
     # Apps mid-update are held back for the whole run.
     $inFlight = @(Get-WinnowUpdateInFlight)
 
-    $findings = New-Object System.Collections.Generic.List[object]
-    $ruleErrors = New-Object System.Collections.Generic.List[object]
-    $i = 0
+    while (-not $walkTask.Wait(250)) {
+        if (-not $NoProgress) {
+            Write-Progress -Activity 'Winnow' -Status ('Measuring {0} ({1:0} s)' -f $driveRoot, ((Get-Date) - $started).TotalSeconds)
+        }
+    }
+    $walk = $walkTask.Result
+    $script:WinnowWalk = $walk
 
     foreach ($rule in $rules) {
-        $i++
-        if (-not $NoProgress) {
-            Write-Progress -Activity 'Winnow scan' -Status "$($rule.Title)" `
-                -PercentComplete ([int](100 * $i / [math]::Max($rules.Count, 1)))
-        }
-
+        if (-not $NoProgress) { Write-Progress -Activity 'Winnow' -Status $rule.Title }
         $candidates = @()
         try {
-            $candidates = @(Select-WinnowUnclaimedCandidate -Candidate @(Get-WinnowRuleCandidate -Rule $rule) -Claimed $claimed)
+            if ($rule.Discover) { $raw = @(Get-WinnowRuleCandidate -Rule $rule) }
+            elseif ($resolved.ContainsKey($rule.Id)) { $raw = $resolved[$rule.Id] }
+            else { continue }
+            # Only the system drive is mapped; a cache moved elsewhere is not an item.
+            $raw = @($raw | Where-Object { $_.Path -and (Test-WinnowPathUnder -Path (ConvertTo-WinnowFullPath $_.Path) -Root $driveRoot) })
+            $candidates = @(Select-WinnowUnclaimedCandidate -Candidate $raw -Claimed $claimed)
         } catch {
             $ruleErrors.Add([pscustomobject]@{ RuleId = $rule.Id; Message = $_.Exception.Message })
             continue
@@ -129,14 +148,14 @@ function Invoke-WinnowScan {
 
         foreach ($c in $candidates) {
             try {
-                $f = ConvertTo-WinnowFinding -Rule $rule -Candidate $c -InFlight $inFlight
+                $f = ConvertTo-WinnowFinding -Rule $rule -Candidate $c -InFlight $inFlight -Walk $walk
                 if ($f) { $findings.Add($f) }
             } catch {
                 $ruleErrors.Add([pscustomobject]@{ RuleId = $rule.Id; Message = $_.Exception.Message })
             }
         }
     }
-    if (-not $NoProgress) { Write-Progress -Activity 'Winnow scan' -Completed }
+    if (-not $NoProgress) { Write-Progress -Activity 'Winnow' -Completed }
 
     $report = [pscustomobject]@{
         Schema      = 'winnow/report/2'
@@ -148,8 +167,17 @@ function Invoke-WinnowScan {
             PSVersion = $PSVersionTable.PSVersion.ToString()
             Elevated  = Test-WinnowElevated
         }
+        Drive       = $driveRoot
         Volumes     = @(Get-WinnowVolumeInfo)
         Findings    = $findings
+        Map         = (Get-WinnowSpaceMap -Walk $walk -Findings $findings -DriveRoot $driveRoot)
+        Walk        = [pscustomobject]@{
+            Seconds      = [math]::Round($walk.Seconds, 1)
+            Files        = $walk.Files
+            Folders      = $walk.FolderCount
+            Unreadable   = $walk.Denied.Count
+            LinksSkipped = $walk.LinksSkipped
+        }
         InFlight    = $inFlight
         RuleErrors  = $ruleErrors
         RuleCount   = $rules.Count
@@ -297,15 +325,6 @@ function ConvertTo-WinnowFinding {
     $verdict = $Rule.Verdict
     $removable = Test-WinnowFindingRemovable -Verdict $verdict -Action $action
 
-    # A rule producing a refused path is a bug; logged with -Verbose.
-    if ($removable) {
-        $g = Test-WinnowGuard -Path $path -AllowsInsideProject @($Rule.AllowsInsideProject)
-        if (-not $g.Allowed) {
-            Write-Verbose "Winnow: rule '$($Rule.Id)' produced a guard-refused path: $($g.Reason)"
-            return $null
-        }
-    }
-
     $entry = $null
     if ($Walk) { $entry = $Walk.Find($path) }
     if (-not $entry) {
@@ -317,6 +336,15 @@ function ConvertTo-WinnowFinding {
         }
     }
     if ($entry.Bytes -lt $Rule.MinBytes) { return $null }
+
+    # A rule producing a refused path is a bug; logged with -Verbose.
+    if ($removable) {
+        $g = Test-WinnowGuard -Path $path -AllowsInsideProject @($Rule.AllowsInsideProject)
+        if (-not $g.Allowed) {
+            Write-Verbose "Winnow: rule '$($Rule.Id)' produced a guard-refused path: $($g.Reason)"
+            return $null
+        }
+    }
 
     $evidence = New-Object System.Collections.Generic.List[string]
     $warnings = New-Object System.Collections.Generic.List[string]

@@ -105,20 +105,30 @@ function Show-WinnowReport {
     Show-WinnowVolume -Volumes @($Report.Volumes)
     Write-Host ''
 
+    $line = { param($r) '  {0} {1,8}  {2} {3}' -f (Format-WinnowCell $r.Title 42), (Format-WinnowSize $r.Bytes), (Format-WinnowCell $r.Verdict 10), $r.Next }
+
+    Write-WinnowLine ('  {0} {1,8}  {2} {3}' -f (Format-WinnowCell 'WHERE THE SPACE IS' 42), 'SIZE', (Format-WinnowCell 'VERDICT' 10), 'NEXT') -Style Head
     $rows = @(Get-WinnowItemRow -Report $Report)
-    if ($rows.Count -eq 0) {
-        Write-WinnowLine '  Nothing found. Either the drive is tidy, or no rule covers what is using the space.' -Style Dim
-    } else {
-        Write-WinnowLine ('  {0} {1,8}  {2} {3}' -f (Format-WinnowCell 'WHERE THE SPACE IS' 42), 'SIZE', (Format-WinnowCell 'VERDICT' 10), 'NEXT') -Style Head
-        $show = $rows
-        if (-not $All -and $rows.Count -gt $Top) { $show = @($rows[0..($Top - 1)]) }
-        foreach ($r in $show) {
-            Write-WinnowLine ('  {0} {1,8}  {2} {3}' -f (Format-WinnowCell $r.Title 42), (Format-WinnowSize $r.Bytes), (Format-WinnowCell $r.Verdict 10), $r.Next) -Style $r.Style
+    $show = $rows
+    if (-not $All -and $rows.Count -gt $Top) { $show = @($rows[0..($Top - 1)]) }
+    foreach ($r in $show) { Write-WinnowLine (& $line $r) -Style $r.Style }
+    if ($show.Count -lt $rows.Count) {
+        $rest = 0; foreach ($r in $rows[$show.Count..($rows.Count - 1)]) { $rest += $r.Bytes }
+        Write-WinnowLine (& $line ([pscustomobject]@{ Title = "$($rows.Count - $show.Count) more items"; Bytes = $rest; Verdict = ''; Next = 'winnow -All' })) -Style Dim
+    }
+
+    $map = $null
+    if ($Report.PSObject.Properties['Map']) { $map = $Report.Map }
+    if ($map) {
+        foreach ($a in $map.Areas) {
+            if ($a.Bytes -lt 100MB) { continue }
+            $largest = ($a.Top | ForEach-Object { '{0} {1}' -f $_.Name, (Format-WinnowSize $_.Bytes) }) -join ', '
+            Write-WinnowLine (& $line ([pscustomobject]@{ Title = $a.Name; Bytes = $a.Bytes; Verdict = '-'; Next = $largest })) -Style Dim
         }
-        if ($show.Count -lt $rows.Count) {
-            $rest = 0; foreach ($r in $rows[$show.Count..($rows.Count - 1)]) { $rest += $r.Bytes }
-            Write-WinnowLine ('  {0} {1,8}  {2}' -f (Format-WinnowCell "$($rows.Count - $show.Count) more items" 42), (Format-WinnowSize $rest), 'winnow -All') -Style Dim
-        }
+        $ne = $map.NotExplained
+        $why = 'restore points, reserved storage'
+        if ($ne.UnreadableDirs -gt 0) { $why += ", $($ne.UnreadableDirs) folders only an administrator can read" }
+        Write-WinnowLine (& $line ([pscustomobject]@{ Title = 'Not explained'; Bytes = $ne.Bytes; Verdict = '-'; Next = $why })) -Style Dim
     }
 
     if ($Report.RuleErrors -and $Report.RuleErrors.Count -gt 0) {
@@ -130,8 +140,12 @@ function Show-WinnowReport {
 
     $cleanNow = 0
     foreach ($f in $Report.Findings) { if (Test-WinnowFindingActionable -Finding $f) { $cleanNow += $f.Bytes } }
+    $explained = ''
+    if ($map -and $map.UsedBytes -gt 0) {
+        $explained = '    Explained: {0:0}% of {1} used' -f (100 * $map.ExplainedBytes / $map.UsedBytes), (Format-WinnowSize $map.UsedBytes)
+    }
     Write-Host ''
-    Write-WinnowLine ('  Clean now: {0}    Nothing has been changed.    ({1:0} s)' -f (Format-WinnowSize $cleanNow), $Report.DurationSec) -Style Good
+    Write-WinnowLine ('  Clean now: {0}{1}    Nothing has been changed.    ({2:0} s)' -f (Format-WinnowSize $cleanNow), $explained, $Report.DurationSec) -Style Good
     Write-Host ''
 }
 

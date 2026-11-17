@@ -6,7 +6,7 @@
         Id       = 'appcache.conventional'
         Title    = 'Application cache directories'
         Verdict  = 'Clean'
-        Discover = { Get-WinnowConventionalCacheCandidate -MaxDepth 3 }
+        Discover = { Get-WinnowConventionalCacheCandidate }
         MinBytes = 25MB
         Consequence = 'Applications rebuild these on next launch. Browser and app state - logins, bookmarks, settings, extensions - is on a separate exclusion list and is never included here.'
     }
