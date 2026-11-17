@@ -138,7 +138,14 @@ function Invoke-WinnowScan {
             elseif ($resolved.ContainsKey($rule.Id)) { $raw = $resolved[$rule.Id] }
             else { continue }
             # Only the system drive is mapped; a cache moved elsewhere is not an item.
-            $raw = @($raw | Where-Object { $_.Path -and (Test-WinnowPathUnder -Path (ConvertTo-WinnowFullPath $_.Path) -Root $driveRoot) })
+            # Folders the walk measured below the rule's minimum are dropped early.
+            $raw = @($raw | Where-Object {
+                $p = $null
+                if ($_.Path) { $p = ConvertTo-WinnowFullPath $_.Path }
+                if (-not $p -or -not (Test-WinnowPathUnder -Path $p -Root $driveRoot)) { return $false }
+                $e = $walk.Find($p)
+                (-not $e) -or ($e.Bytes -ge $rule.MinBytes)
+            })
             $candidates = @(Select-WinnowUnclaimedCandidate -Candidate $raw -Claimed $claimed)
         } catch {
             $ruleErrors.Add([pscustomobject]@{ RuleId = $rule.Id; Message = $_.Exception.Message })

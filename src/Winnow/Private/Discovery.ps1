@@ -30,7 +30,13 @@ function Resolve-WinnowRoot {
                 $timeout = 10
                 if ($step.ContainsKey('TimeoutSec')) { $timeout = [int]$step.TimeoutSec }
                 if (-not (Get-Command -Name $step.Command -ErrorAction SilentlyContinue)) { continue }
-                $out = Invoke-WinnowCli -Command $step.Command -Arguments $step.Args -TimeoutSec $timeout
+                # npm and npx rules ask the same question; ask once per scan.
+                $key = "$($step.Command) $($step.Args)"
+                if ($script:WinnowCliAnswers.ContainsKey($key)) { $out = $script:WinnowCliAnswers[$key] }
+                else {
+                    $out = Invoke-WinnowCli -Command $step.Command -Arguments $step.Args -TimeoutSec $timeout
+                    $script:WinnowCliAnswers[$key] = $out
+                }
                 if ([string]::IsNullOrWhiteSpace($out)) { continue }
                 # Take the first line that looks like an absolute path.
                 foreach ($line in ($out -split "`r?`n")) {
@@ -146,6 +152,9 @@ function Get-WinnowUninstallEntry {
     return $list
 }
 
+$script:WinnowCliAnswers = @{}
+
 function Reset-WinnowDiscoveryCache {
     $script:WinnowUninstallCache = $null
+    $script:WinnowCliAnswers = @{}
 }

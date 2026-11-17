@@ -232,6 +232,7 @@ namespace Winnow
             var work = new Stack<int>();
             work.Push(0);
             int outstanding = 1;
+            int idle = 0;
             var gate = new object();
 
             ThreadStart body = delegate
@@ -245,7 +246,7 @@ namespace Winnow
                         int index; string path; Frame frame;
                         lock (gate)
                         {
-                            while (work.Count == 0 && outstanding > 0) Monitor.Wait(gate);
+                            while (work.Count == 0 && outstanding > 0) { idle++; Monitor.Wait(gate); idle--; }
                             if (outstanding == 0) { Monitor.PulseAll(gate); return; }
                             index = work.Pop();
                             frame = frames[index];
@@ -285,7 +286,9 @@ namespace Winnow
                                 outstanding++;
                             }
                             outstanding--;
-                            Monitor.PulseAll(gate);
+                            // Wake only as many idle threads as there is new work.
+                            if (outstanding == 0) Monitor.PulseAll(gate);
+                            else for (int k = Math.Min(idle, work.Count); k > 0; k--) Monitor.Pulse(gate);
                         }
                     }
                 }

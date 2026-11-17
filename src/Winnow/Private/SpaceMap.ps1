@@ -137,6 +137,7 @@ function Get-WinnowAreaTop {
     foreach ($ar in $AreaRoots) {
         $owned = @($Findings | Where-Object { [object]::ReferenceEquals((Get-WinnowNearestRoot -Path $_.Path -Roots $Roots), $ar) })
         foreach ($c in $Walk.Children($ar.Path)) {
+            if ($c.Bytes -lt 100MB) { continue }
             $net = [double]$c.Bytes
             $prefix = $c.Path + '\'
             foreach ($r in $Roots) {
