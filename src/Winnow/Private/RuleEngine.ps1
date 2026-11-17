@@ -338,7 +338,7 @@ function ConvertTo-WinnowFinding {
     }
     if ($s.NeedsConfirm -and -not $Rule.ExpectsDocuments) {
         $sentinelDocs = $true
-        $warnings.Add($s.Reason + ' (e.g. ' + (($s.Samples | Select-Object -First 3) -join ', ') + ')')
+        $warnings.Add($s.Reason)
     }
 
     $toolMissing = $false

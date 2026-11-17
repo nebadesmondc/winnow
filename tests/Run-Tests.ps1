@@ -42,7 +42,7 @@ $manifest = Join-Path $moduleDir 'Winnow.psd1'
 
 # Module and launcher sources
 function Get-ShippedSource {
-    $files = @(Get-ChildItem -LiteralPath $moduleDir -Include '*.ps1', '*.psm1', '*.psd1' -Recurse -File)
+    $files = @(Get-ChildItem -LiteralPath $moduleDir -Include '*.ps1', '*.psm1', '*.psd1', '*.cs' -Recurse -File)
     if (Test-Path -LiteralPath $toolsDir) {
         $files += @(Get-ChildItem -LiteralPath $toolsDir -Include '*.ps1', '*.cmd' -Recurse -File)
     }
@@ -99,8 +99,21 @@ Test-Case 'no delete API exists outside Remove-Safely.ps1' {
         '\.Delete\(\)',
         '(?i)\brobocopy\b',
         '(?i)\bMove-Item\b',
-        '(?i)\bClear-Content\b'
+        '(?i)\bClear-Content\b',
+        '\bFile\.Delete\(', '\bDirectory\.Delete\(', '(?i)DeleteFile', '(?i)DeleteDirectory',
+        '(?i)RemoveDirectory', '(?i)MoveFile', '(?i)SendToRecycleBin'
     )
+}
+
+Test-Case 'the native walker only lists folders' {
+    $cs = Get-Content -LiteralPath (Join-Path $moduleDir 'Private\SpaceWalker.cs') -Raw
+    foreach ($p in @('GENERIC_WRITE', '0x40000000', 'GENERIC_ALL', 'DELETE\b', 'WriteFile', 'DeviceIoControl',
+                     'SetFileInformation', 'SetFileAttributes', 'SetEndOfFile', 'CreateDirectory', 'Process\.Start')) {
+        if ($cs -cmatch $p) { throw "SpaceWalker.cs uses '$p'" }
+    }
+    $opens = [regex]::Matches($cs, 'CreateFileW\(')
+    $listOnly = [regex]::Matches($cs, 'CreateFileW\([^,]+, FILE_LIST_DIRECTORY,')
+    Assert-Equal ($opens.Count - 1) $listOnly.Count 'a CreateFileW call opens something other than a folder listing'
 }
 
 Test-Case 'no network API exists anywhere Winnow ships' {
@@ -109,7 +122,8 @@ Test-Case 'no network API exists anywhere Winnow ships' {
         '(?i)Net\.WebClient', '(?i)System\.Net\.Http', '(?i)HttpClient', '(?i)WebRequest\]',
         '(?i)Net\.Sockets', '(?i)TcpClient', '(?i)UdpClient', '(?i)Net\.Dns', '(?i)Resolve-DnsName',
         '(?i)Start-BitsTransfer', '(?i)\bbitsadmin\b', '(?i)DownloadString', '(?i)DownloadFile',
-        '(?i)\bcurl(\.exe)?\b', '(?i)\bwget\b', '(?i)Test-NetConnection', '(?i)Send-MailMessage'
+        '(?i)\bcurl(\.exe)?\b', '(?i)\bwget\b', '(?i)Test-NetConnection', '(?i)Send-MailMessage',
+        '(?i)\bSystem\.Net\b', '(?i)WebRequest'
     )
 }
 
@@ -358,6 +372,33 @@ Test-Case 'measurement does not follow junctions' {
     Assert-True ($m.SkippedLinks -ge 1) 'measurement did not record a skipped link'
 }
 
+Test-Case 'sizes are space on disk, and a hard-linked file counts once' {
+    $d = Join-Path $sandbox 'hardlinks'
+    [void](New-Item -ItemType Directory -Path (Join-Path $d 'second') -Force)
+    $a = Join-Path $d 'a.bin'
+    [System.IO.File]::WriteAllBytes($a, (New-Object byte[] 300000))
+    [void](New-Item -ItemType HardLink -Path (Join-Path $d 'second\b.bin') -Target $a)
+
+    $one = & $M { param($p) Measure-WinnowTree -Path $p } $a
+    Assert-True ($one.Bytes -ge 300000 -and $one.Bytes -lt 400000) "a 300000-byte file measured $($one.Bytes) bytes on disk"
+
+    $w = & $M { param($p) [Winnow.SpaceWalker]::Walk((New-WinnowWalkOptions -Root $p -KeepMinBytes 0 -KeepDepth 5)) } $d
+    Assert-Equal $one.Bytes ([double]$w.Bytes) 'a file with two names was counted twice'
+    $second = $w.Find((Join-Path $d 'second'))
+    Assert-Equal ([math]::Floor($one.Bytes / 2)) ([double]$second.Bytes) 'the second name did not get half the file'
+    Assert-Equal 0 ([double]$second.FreeableBytes) 'deleting one name was reported as freeing the file'
+    Assert-Equal $one.Bytes ([double]$w.Find($d).FreeableBytes) 'deleting both names was not reported as freeing the file'
+}
+
+Test-Case 'sentinel blocks a folder that holds a virtual disk' {
+    $d = Join-Path $sandbox 'disk-cache'
+    [void](New-Item -ItemType Directory -Path $d -Force)
+    Set-Content -LiteralPath (Join-Path $d 'machine.vhdx') -Value 'not a disk' -Encoding ascii
+    $s = & $M { param($p) Test-WinnowSentinel -Path $p } $d
+    Assert-True $s.Blocked 'a folder holding a virtual disk was not blocked'
+    Assert-True ($s.Reason -match 'virtual disk') "unexpected reason: $($s.Reason)"
+}
+
 Test-Case 'lock detection sees a held file, and stops seeing it when released' {
     $d = Join-Path $sandbox 'locked-cache'
     [void](New-Item -ItemType Directory -Path $d -Force)
@@ -474,9 +515,11 @@ Test-Case 'freed space is measured on disk, not copied from the scan' {
     [void](New-Item -ItemType Directory -Path (Join-Path $d 'sub') -Force)
     [System.IO.File]::WriteAllBytes((Join-Path $d 'a.bin'), (New-Object byte[] 300000))
     [System.IO.File]::WriteAllBytes((Join-Path $d 'sub\b.bin'), (New-Object byte[] 100000))
+    $onDisk = (& $M { param($p) Measure-WinnowTree -Path $p } $d).Bytes
+    Assert-True ($onDisk -ge 400000) "400000 bytes of files measured $onDisk on disk"
     $r = & $M { param($p) Remove-WinnowPath -Path $p -Confirm:$false } $d
     Assert-True $r.Removed "not removed: $($r.Reason)"
-    Assert-Equal 400000 ([double]$r.BytesClaimed) "reported $($r.BytesClaimed) bytes freed for 400000 on disk"
+    Assert-Equal $onDisk ([double]$r.BytesClaimed) "reported $($r.BytesClaimed) bytes freed for $onDisk on disk"
     Assert-Equal 0 ([double]$r.BytesLeft) 'reported bytes left over after a full removal'
 }
 
