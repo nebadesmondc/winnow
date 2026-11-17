@@ -678,6 +678,34 @@ Test-Case 'winnow explain shows what removing an item costs' {
     & $M { $script:WinnowLastReport = $null }
 }
 
+Test-Case 'winnow clean asks once; anything but yes changes nothing' {
+    $d = Join-Path $sandbox 'front-door'
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $d 'c.bin') -Value 'x' -Encoding ascii
+    $run = {
+        param($r, $p, $answer)
+        $script:TestAnswer = $answer
+        function script:Read-Host { $script:TestAnswer }
+        try {
+            $x = New-WinnowFinding -Rule $r -Path $p -Bytes 1MB
+            $script:WinnowLastReport = [pscustomobject]@{ RunId = 'test'; StartedUtc = (Get-Date).ToUniversalTime(); Findings = @($x); Volumes = @() }
+            Invoke-Winnow clean 6>&1 | Out-Null
+        } finally {
+            Remove-Item -Path Function:\Read-Host
+            $script:WinnowLastReport = $null
+        }
+    }
+    & $M $run $fakeRule $d ''
+    Assert-True (Test-Path -LiteralPath $d) 'Enter alone removed the item'
+    & $M $run $fakeRule $d 'y'
+    Assert-False (Test-Path -LiteralPath $d) 'yes did not remove the item'
+
+    $runs = Join-Path $env:LOCALAPPDATA 'Winnow\runs'
+    Get-ChildItem -LiteralPath $runs -Filter '*.json' -ErrorAction SilentlyContinue |
+        Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match '"ScanRunId":\s*"test"' } |
+        Remove-Item -Force
+}
+
 if ($env:CI) {
     Test-Case 'your call items go to the Recycle Bin' {
         $d = Join-Path $sandbox 'old-version'
