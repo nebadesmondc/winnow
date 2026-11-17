@@ -1,0 +1,299 @@
+# Path guard: deny first, then require an allow root, so unknown locations
+# fail closed. Checks are listed in SAFETY.md.
+
+function Get-WinnowGuardPolicy {
+    if ($script:WinnowGuardPolicy) { return $script:WinnowGuardPolicy }
+
+    $win      = ConvertTo-WinnowFullPath $env:WINDIR
+    $pf       = ConvertTo-WinnowFullPath $env:ProgramFiles
+    $pf86     = $null
+    $pf86Raw  = ${env:ProgramFiles(x86)}
+    if ($pf86Raw) { $pf86 = ConvertTo-WinnowFullPath $pf86Raw }
+    $progData = ConvertTo-WinnowFullPath $env:ProgramData
+    $userHome = ConvertTo-WinnowFullPath $env:USERPROFILE
+    $local    = ConvertTo-WinnowFullPath $env:LOCALAPPDATA
+    $roaming  = ConvertTo-WinnowFullPath $env:APPDATA
+    $temp     = ConvertTo-WinnowFullPath $env:TEMP
+
+    # Deny roots
+    $denyRoots = New-Object System.Collections.Generic.List[string]
+    foreach ($p in @($win, $pf, $pf86)) {
+        if ($p) { $denyRoots.Add($p) }
+    }
+    if ($progData) {
+        # MSI repair sources; removing them breaks repair and uninstall.
+        $denyRoots.Add((Join-Path $progData 'Package Cache'))
+    }
+
+    # Matched on any drive
+    $denyVolumeRelative = @(
+        'System Volume Information', '$Recycle.Bin', 'Recovery', 'Boot', 'EFI',
+        'Config.Msi', '$WinREAgent', 'Windows.old', 'PerfLogs'
+    )
+
+    # Denied by file name, anywhere
+    $denyFileNames = @(
+        'pagefile.sys', 'swapfile.sys', 'hiberfil.sys',
+        'DumpStack.log', 'DumpStack.log.tmp', 'bootmgr', 'BOOTNXT', 'ntldr'
+    )
+
+    # User content
+    $userContent = New-Object System.Collections.Generic.List[string]
+    foreach ($n in @('Documents', 'Desktop', 'Pictures', 'Music', 'Videos',
+                     'Favorites', 'Contacts', 'Links', 'Saved Games', 'Searches')) {
+        $kf = Get-WinnowKnownFolder -Name $n
+        if ($kf) { $userContent.Add($kf) }
+        if ($userHome) { $userContent.Add((Join-Path $userHome $n)) }
+    }
+    if ($userHome) {
+        $userContent.Add((Join-Path $userHome 'Downloads'))
+        # Cloud sync roots
+        foreach ($child in @('OneDrive', 'Dropbox', 'Google Drive', 'iCloudDrive', 'Box', 'Sync')) {
+            $userContent.Add((Join-Path $userHome $child))
+        }
+        try {
+            foreach ($d in [System.IO.Directory]::GetDirectories((ConvertTo-WinnowLongPath $userHome))) {
+                $leaf = [System.IO.Path]::GetFileName($d)
+                if ($leaf -like 'OneDrive*' -or $leaf -like 'Dropbox*' -or
+                    $leaf -like '*Google Drive*' -or $leaf -like 'Nextcloud*') {
+                    $userContent.Add((Join-Path $userHome $leaf))
+                }
+            }
+        } catch { }
+    }
+
+    # Credentials and secrets
+    $credentialDirNames = @(
+        '.ssh', '.gnupg', '.gpg', '.aws', '.azure', '.kube', '.docker',
+        'Microsoft\Credentials', 'Microsoft\Protect', 'Microsoft\Vault',
+        'Microsoft\SystemCertificates', 'credentials'
+    )
+    $credentialFilePatterns = @(
+        '*.pem', '*.ppk', '*.pfx', '*.p12', '*.key', '*.kdbx', '*.keytab',
+        '*.asc', '*.gpg', '*.jks', 'id_rsa*', 'id_ed25519*', 'id_ecdsa*',
+        '.env', '.env.*', '.npmrc', '.pypirc', '.git-credentials', '.netrc'
+    )
+
+    # Source project markers
+    $projectMarkers = @(
+        '.git', '.hg', '.svn', '.jj', 'pom.xml', 'build.gradle', 'build.gradle.kts',
+        'pyproject.toml', 'Cargo.toml', 'go.mod', 'package.json', 'CMakeLists.txt'
+    )
+
+    # A path must be under one of these, and not be one of them
+    $allowRoots = New-Object System.Collections.Generic.List[string]
+    foreach ($p in @($local, $roaming, $temp, $userHome, $progData)) {
+        if ($p) { $allowRoots.Add($p) }
+    }
+
+    $script:WinnowGuardPolicy = [pscustomobject]@{
+        DenyRoots              = $denyRoots
+        DenyVolumeRelative     = $denyVolumeRelative
+        DenyFileNames          = $denyFileNames
+        UserContentRoots       = $userContent
+        CredentialDirNames     = $credentialDirNames
+        CredentialFilePatterns = $credentialFilePatterns
+        ProjectMarkers         = $projectMarkers
+        AllowRoots             = $allowRoots
+        MinSegments            = 3
+        ProjectLookupDepth     = 4
+    }
+    return $script:WinnowGuardPolicy
+}
+
+function Reset-WinnowGuardPolicy {
+    # Test hook
+    $script:WinnowGuardPolicy = $null
+    $script:WinnowVolumeCache = $null
+}
+
+function Test-WinnowPathUnder {
+    <#
+    .SYNOPSIS
+    True when $Path is $Root or beneath it. Case-insensitive; "C:\Foo" does
+    not match "C:\Foobar".
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowNull()][string]$Root
+    )
+    if ([string]::IsNullOrWhiteSpace($Root)) { return $false }
+    $p = $Path.TrimEnd('\')
+    $r = $Root.TrimEnd('\')
+    if ($p.Equals($r, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $p.StartsWith($r + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-WinnowGuard {
+    <#
+    .SYNOPSIS
+    Decides whether a path may be removed. Returns an object, never throws.
+
+    .OUTPUTS
+    [pscustomobject] Allowed (bool), Reason (string), Path (canonical)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$Path,
+        [string[]]$AllowsInsideProject = @()
+    )
+
+    function _deny($reason, $canon) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $reason; Path = $canon }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return (_deny 'empty path' $Path) }
+
+    # 1. Canonicalise ('..', mixed separators)
+    $canon = ConvertTo-WinnowFullPath $Path
+    if (-not $canon) { return (_deny 'path could not be canonicalised' $Path) }
+    if ($canon -match '^[\\/]{2}[?.]') { return (_deny 'device-namespace path' $canon) }
+
+    $policy = Get-WinnowGuardPolicy
+
+    # 2. Drive roots and shallow paths
+    $root = [System.IO.Path]::GetPathRoot($canon)
+    if ($canon.TrimEnd('\').Equals($root.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        return (_deny 'drive root' $canon)
+    }
+    $segments = @($canon.Substring($root.Length).Split(@('\'), [System.StringSplitOptions]::RemoveEmptyEntries))
+    if ($segments.Count -lt ($policy.MinSegments - 1)) {
+        return (_deny "path too shallow ($($segments.Count) segment(s) below root)" $canon)
+    }
+
+    # 3. Fixed local disks only
+    if (-not (Test-WinnowFixedVolume -Path $canon)) {
+        return (_deny 'not on a local fixed volume' $canon)
+    }
+
+    # 4. System files
+    $leaf = [System.IO.Path]::GetFileName($canon)
+    foreach ($n in $policy.DenyFileNames) {
+        if ($leaf.Equals($n, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return (_deny "protected system file '$n'" $canon)
+        }
+    }
+
+    # 5. Windows, Program Files, Package Cache
+    foreach ($d in $policy.DenyRoots) {
+        if (Test-WinnowPathUnder -Path $canon -Root $d) {
+            return (_deny "inside protected system location '$d'" $canon)
+        }
+    }
+
+    # 6. Protected volume folders
+    foreach ($vr in $policy.DenyVolumeRelative) {
+        if (Test-WinnowPathUnder -Path $canon -Root (Join-Path $root $vr)) {
+            return (_deny "inside protected location '$vr'" $canon)
+        }
+    }
+
+    # 7. User content
+    foreach ($u in $policy.UserContentRoots) {
+        if (Test-WinnowPathUnder -Path $canon -Root $u) {
+            return (_deny "inside user content location '$u'" $canon)
+        }
+    }
+
+    # 8. Credential directories
+    foreach ($seg in $segments) {
+        foreach ($c in $policy.CredentialDirNames) {
+            if (-not $c.Contains('\')) {
+                if ($seg.Equals($c, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return (_deny "credential directory '$seg'" $canon)
+                }
+            }
+        }
+    }
+    foreach ($c in $policy.CredentialDirNames) {
+        if ($c.Contains('\')) {
+            if ($canon -match ([regex]::Escape('\' + $c))) {
+                return (_deny "credential directory '$c'" $canon)
+            }
+        }
+    }
+
+    # 9. Key and secret files
+    foreach ($pat in $policy.CredentialFilePatterns) {
+        if ($leaf -like $pat) { return (_deny "credential or key file pattern '$pat'" $canon) }
+    }
+
+    # 10. Links, and paths reached through one (e.g. "All Users" -> ProgramData)
+    if (Test-WinnowPathExists -Path $canon) {
+        if (Test-WinnowReparsePoint -Path $canon) {
+            return (_deny 'path is a reparse point (junction/symlink)' $canon)
+        }
+    }
+    $walk = [System.IO.Path]::GetDirectoryName($canon)
+    $hops = 0
+    while ($walk -and $hops -lt 40) {
+        if (Test-WinnowPathUnder -Path $walk -Root $root) {
+            if ($walk.TrimEnd('\').Equals($root.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) { break }
+        }
+        if (Test-WinnowReparsePoint -Path $walk) {
+            return (_deny "reached via reparse point '$walk'" $canon)
+        }
+        $walk = [System.IO.Path]::GetDirectoryName($walk)
+        $hops++
+    }
+
+    # 11. Source projects: only a build folder the rule names, never the project
+    $projectHit = $null
+    $probe = $canon
+    for ($i = 0; $i -le $policy.ProjectLookupDepth; $i++) {
+        if (-not $probe) { break }
+        if ($probe.TrimEnd('\').Equals($root.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) { break }
+        foreach ($m in $policy.ProjectMarkers) {
+            if (Test-WinnowPathExists -Path (Join-Path $probe $m)) {
+                $projectHit = [pscustomobject]@{ Dir = $probe; Marker = $m }
+                break
+            }
+        }
+        if ($projectHit) { break }
+        $probe = [System.IO.Path]::GetDirectoryName($probe)
+    }
+    if ($projectHit) {
+        $permitted = $false
+        foreach ($allowed in $AllowsInsideProject) {
+            if ($leaf.Equals($allowed, [System.StringComparison]::OrdinalIgnoreCase)) { $permitted = $true }
+        }
+        if ($projectHit.Dir.TrimEnd('\').Equals($canon.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+            $permitted = $false   # never the project root itself
+        }
+        if (-not $permitted) {
+            return (_deny "inside a source project (found '$($projectHit.Marker)' in '$($projectHit.Dir)')" $canon)
+        }
+    }
+
+    # 12. Allow roots
+    $matched = $null
+    foreach ($a in $policy.AllowRoots) {
+        if (Test-WinnowPathUnder -Path $canon -Root $a) {
+            if ($canon.TrimEnd('\').Equals($a.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+                return (_deny "is an allow-root itself ('$a')" $canon)
+            }
+            if ($null -eq $matched -or $a.Length -gt $matched.Length) { $matched = $a }
+        }
+    }
+    if (-not $matched) {
+        return (_deny 'outside every permitted root (fails closed)' $canon)
+    }
+
+    return [pscustomobject]@{ Allowed = $true; Reason = "permitted under '$matched'"; Path = $canon }
+}
+
+function Assert-WinnowGuard {
+    <#
+    .SYNOPSIS
+    Throws unless the path may be removed; returns the canonical path.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$Path,
+        [string[]]$AllowsInsideProject = @()
+    )
+    $verdict = Test-WinnowGuard -Path $Path -AllowsInsideProject $AllowsInsideProject
+    if (-not $verdict.Allowed) {
+        throw "Winnow guard refused '$Path': $($verdict.Reason)"
+    }
+    return $verdict.Path
+}
