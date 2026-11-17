@@ -105,6 +105,7 @@ An installed editor extension (a folder directly in `~\.vscode\extensions` and s
 | Secrets | key material and virtual disks hold a folder back; certificate bundles do not |
 | Older versions | only versions older than the one in use; a pending update is not stale |
 | Numbers | freed space measured on disk; the map places every byte once; no finding inside another |
+| Whole scan | a fake drive with one item of each kind: each is found with its verdict, the one holding a key is held back |
 | Recycle Bin | Your call items go to the Recycle Bin (CI only) |
 | Read-only scan | a scan changes nothing; `-WhatIf` changes nothing |
 

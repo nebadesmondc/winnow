@@ -17,7 +17,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 -Detail
 Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
 ```
 
-The tests need nothing installed. Fixtures go in a temporary `%LOCALAPPDATA%\winnow-selftest-*` folder, and one read-only scan of the machine checks every path the rules produce. `SpaceWalker.cs` is compiled once per session; start a new one after changing it.
+The tests need nothing installed. Fixtures go in a temporary `%LOCALAPPDATA%\winnow-selftest-*` folder. A scan of a fake drive runs every rule end to end; a read-only scan of the machine follows, except on CI, where it runs only when the workflow is started by hand with full scan on. `SpaceWalker.cs` is compiled once per session; start a new one after changing it.
 
 ## Adding a rule
 

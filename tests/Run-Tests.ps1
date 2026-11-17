@@ -855,98 +855,188 @@ Test-Case 'choosing a held-back item says why, not that it is missing' {
     Assert-False ($text -match 'not present|not in (this|the)') "still says the id is missing: $text"
 }
 
-# ==========================================================================
-Write-Host ''
-Write-Host 'SCAN' -ForegroundColor White
-# ==========================================================================
+# Checks every scan must pass, on a fake drive or a real one.
+function Test-ScanInvariant {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'Scan',
+        Justification = 'Read by the Test-Case bodies through dynamic scope.')]
+    param([object]$Scan, [string]$Label)
 
-# One full scan, shared by the tests below.
-Write-Host '  (scanning once, reused by the tests below)' -ForegroundColor DarkGray
-$scan = Get-WinnowReport
+    Test-Case "${Label}: the scan reports no rule errors" {
+        Assert-Equal 'winnow/report/2' $Scan.Schema
+        Assert-Equal 0 $Scan.RuleErrors.Count "rule errors: $(($Scan.RuleErrors | ForEach-Object { $_.RuleId + ': ' + $_.Message }) -join '; ')"
+    }
 
-Test-Case 'a scan produces a report and changes nothing' {
-    Assert-Equal 'winnow/report/2' $scan.Schema
-    Assert-True ($scan.Volumes.Count -ge 1) 'no volumes reported'
-    Assert-True ($null -ne $scan.Findings) 'no findings collection'
-    Assert-Equal 0 $scan.RuleErrors.Count "scan reported rule errors: $(($scan.RuleErrors | ForEach-Object { $_.RuleId + ': ' + $_.Message }) -join '; ')"
-}
+    Test-Case "${Label}: the map places every measured byte once" {
+        $sum = 0
+        foreach ($f in $Scan.Findings) { $sum += $f.Bytes }
+        foreach ($a in $Scan.Map.Areas) { $sum += $a.Bytes }
+        $gap = [math]::Abs($sum - $Scan.Map.ExplainedBytes)
+        Assert-True ($gap -le 0.01 * $Scan.Map.ExplainedBytes + 1MB) ('items and areas add up to {0:N1} MB, the walk measured {1:N1} MB' -f ($sum / 1MB), ($Scan.Map.ExplainedBytes / 1MB))
+        Assert-True ($Scan.Map.ExplainedBytes -le $Scan.Map.UsedBytes) 'the map explains more than is used'
+    }
 
-Write-Host ('  (walked {0:N0} files in {1} s; scan {2} s; {3:0}% of {4:0} GB used explained)' -f `
-    $scan.Walk.Files, $scan.Walk.Seconds, $scan.DurationSec, (100 * $scan.Map.ExplainedBytes / $scan.Map.UsedBytes), ($scan.Map.UsedBytes / 1GB)) -ForegroundColor DarkGray
+    Test-Case "${Label}: nothing found as Move or Hands off, and no virtual disk, is removable" {
+        foreach ($f in $Scan.Findings) {
+            if ($f.Verdict -in @('Move', 'HandsOff') -or $f.RuleId -like 'vdisk.*') {
+                Assert-False (& $M { param($x) Test-WinnowFindingActionable -Finding $x -ById } $f) "$($f.Title) was removable"
+            }
+            if ($f.Verdict -eq 'HandsOff') { Assert-True (@($f.Steps).Count -gt 0) "$($f.Title) has no steps" }
+        }
+    }
 
-Test-Case 'the map places every measured byte once' {
-    $sum = 0
-    foreach ($f in $scan.Findings) { $sum += $f.Bytes }
-    foreach ($a in $scan.Map.Areas) { $sum += $a.Bytes }
-    $gap = [math]::Abs($sum - $scan.Map.ExplainedBytes)
-    Assert-True ($gap -lt 0.01 * $scan.Map.UsedBytes) ('items and areas add up to {0:N2} GB, the walk measured {1:N2} GB' -f ($sum / 1GB), ($scan.Map.ExplainedBytes / 1GB))
-    Assert-True ($scan.Map.ExplainedBytes -le $scan.Map.UsedBytes) 'the map explains more than is used'
-    Assert-True ($scan.Map.NotExplained.Bytes -ge 0) 'negative unexplained space'
-}
+    Test-Case "${Label}: every path that could be removed is accepted by the guard" {
+        foreach ($f in $Scan.Findings) {
+            if (-not (& $M { param($x) Test-WinnowFindingRemovable -Verdict $x.Verdict -Action $x.Action } $f)) { continue }
+            $v = Guard $f.Path @($f.AllowsInsideProject)
+            Assert-True $v.Allowed "rule '$($f.RuleId)' produced a guard-refused path '$($f.Path)': $($v.Reason)"
+        }
+    }
 
-Test-Case 'nothing found as Move or Hands off, and no virtual disk, is removable' {
-    foreach ($f in $scan.Findings) {
-        if ($f.Verdict -in @('Move', 'HandsOff') -or $f.RuleId -like 'vdisk.*') {
-            Assert-False (& $M { param($x) Test-WinnowFindingActionable -Finding $x -ById } $f) "$($f.Title) was removable"
+    Test-Case "${Label}: no space is counted twice, no finding sits inside another" {
+        $paths = @($Scan.Findings | ForEach-Object { $_.Path.TrimEnd('\') })
+        for ($i = 0; $i -lt $paths.Count; $i++) {
+            for ($j = 0; $j -lt $paths.Count; $j++) {
+                if ($i -eq $j) { continue }
+                $a = $paths[$i]; $b = $paths[$j]
+                if ($a.Equals($b, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $a.StartsWith($b + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw "'$a' is counted, and so is '$b' which contains it"
+                }
+            }
+        }
+    }
+
+    Test-Case "${Label}: every finding carries a consequence, a verdict and a unique id" {
+        $ids = @{}
+        foreach ($f in $Scan.Findings) {
+            Assert-True (-not [string]::IsNullOrWhiteSpace($f.Consequence)) "finding $($f.Id) has no consequence"
+            Assert-True ($f.Verdict -in @('Clean', 'Move', 'YourCall', 'HandsOff')) "finding $($f.Id) has verdict '$($f.Verdict)'"
+            Assert-False $ids.ContainsKey($f.Id) "two findings share the id $($f.Id)"
+            $ids[$f.Id] = $true
         }
     }
 }
 
-Test-Case 'the pagefile and hibernation file are explained, never removable' {
-    foreach ($f in @($scan.Findings | Where-Object { $_.RuleId -like 'system.*' })) {
-        Assert-False (& $M { param($x) Test-WinnowFindingActionable -Finding $x -ById } $f) "$($f.Title) was removable"
-        Assert-True (@($f.Steps).Count -gt 0) "$($f.Title) has no steps"
-    }
+Test-Case 'the pagefile candidate is the system drive''s pagefile.sys' {
     $c = & $M { Get-WinnowPagefileCandidate }
     Assert-True ($c.Path -like '*\pagefile.sys' -and $c.Extra.Id -eq 'pagefile') "unexpected pagefile candidate: $($c.Path)"
 }
 
-Test-Case 'every path that could be removed is accepted by the guard' {
-    foreach ($f in $scan.Findings) {
-        if (-not (& $M { param($x) Test-WinnowFindingRemovable -Verdict $x.Verdict -Action $x.Action } $f)) { continue }
-        $v = Guard $f.Path @($f.AllowsInsideProject)
-        Assert-True $v.Allowed "rule '$($f.RuleId)' produced a guard-refused path '$($f.Path)': $($v.Reason)"
-    }
+# ==========================================================================
+Write-Host ''
+Write-Host 'SCAN - fake drive' -ForegroundColor White
+# ==========================================================================
+
+# One item of each kind, under profile folders the scan is pointed at. Rules
+# run with no minimum size so the fixture stays small.
+$fake = Join-Path $sandbox 'fakedrive'
+$fakeHome = Join-Path $fake 'Users\me'
+$fakeLocal = Join-Path $fakeHome 'AppData\Local'
+$fakeRoaming = Join-Path $fakeHome 'AppData\Roaming'
+
+function New-Blob {
+    param([string]$Path, [int]$Bytes)
+    [void](New-Item -ItemType Directory -Path (Split-Path $Path -Parent) -Force)
+    [System.IO.File]::WriteAllBytes($Path, (New-Object byte[] $Bytes))
 }
 
-Test-Case 'no space is counted twice: no finding sits inside another' {
-    $paths = @($scan.Findings | ForEach-Object { $_.Path.TrimEnd('\') })
-    for ($i = 0; $i -lt $paths.Count; $i++) {
-        for ($j = 0; $j -lt $paths.Count; $j++) {
-            if ($i -eq $j) { continue }
-            $a = $paths[$i]; $b = $paths[$j]
-            if ($a.Equals($b, [System.StringComparison]::OrdinalIgnoreCase) -or
-                $a.StartsWith($b + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-                throw "'$a' is counted, and so is '$b' which contains it"
-            }
+New-Blob (Join-Path $fakeLocal 'Maker\App\Cache\data_0') 1MB
+New-Blob (Join-Path $fakeLocal 'Keyed\App\Cache\data_0') 1MB
+New-Fixture (Join-Path $fakeLocal 'Keyed\App\Cache\id_rsa') '-----BEGIN OPENSSH PRIVATE KEY-----'
+New-Fixture (Join-Path $fakeLocal 'uv\cache\wheels\pkg.whl')
+New-Fixture (Join-Path $fakeLocal 'Temp\old-download\part.bin')
+(Get-Item -LiteralPath (Join-Path $fakeLocal 'Temp\old-download\part.bin')).LastWriteTime = (Get-Date).AddDays(-10)
+New-Fixture (Join-Path $fakeLocal 'Chat\Update.exe')
+New-Fixture (Join-Path $fakeLocal 'Chat\app-1.0.0\chat.dll')
+New-Fixture (Join-Path $fakeLocal 'Chat\app-1.1.0\chat.dll')
+New-Fixture (Join-Path $fakeHome '.vscode\extensions\pub.tool-1.0.0\package.json') '{}'
+New-Fixture (Join-Path $fakeHome '.vscode\extensions\pub.tool-1.1.0\package.json') '{}'
+New-Fixture (Join-Path $fakeHome '.vscode\extensions\extensions.json') '[{"relativeLocation":"pub.tool-1.1.0"}]'
+New-Fixture (Join-Path $fakeHome 'Documents\report.docx')
+[void](New-Item -ItemType Directory -Path $fakeRoaming -Force)
+$disk = Join-Path $fakeLocal 'Docker\wsl\disk\docker_data.vhdx'
+[void](New-Item -ItemType Directory -Path (Split-Path $disk -Parent) -Force)
+$fs = [System.IO.File]::Create($disk); $fs.SetLength(64MB); $fs.Close()
+
+$savedEnv = @{ USERPROFILE = $env:USERPROFILE; LOCALAPPDATA = $env:LOCALAPPDATA; APPDATA = $env:APPDATA; TEMP = $env:TEMP }
+try {
+    $env:USERPROFILE = $fakeHome; $env:LOCALAPPDATA = $fakeLocal; $env:APPDATA = $fakeRoaming
+    $env:TEMP = Join-Path $fakeLocal 'Temp'
+    & $M { Reset-WinnowGuardPolicy; foreach ($r in (Import-WinnowRule -Refresh)) { $r.MinBytes = 0 } }
+    $fakeScan = & $M { param($root) Invoke-WinnowScan -Root $root -NoProgress } $fake
+
+    Test-ScanInvariant -Scan $fakeScan -Label 'fake drive'
+
+    Test-Case 'fake drive: each planted item is found with its verdict' {
+        $found = @{}
+        foreach ($f in $fakeScan.Findings) { $found[$f.Path.Substring($fake.Length + 1)] = $f }
+        $want = [ordered]@{
+            'Users\me\AppData\Local\Maker\App\Cache'                  = 'appcache.conventional:Clean'
+            'Users\me\AppData\Local\Keyed\App\Cache'                  = 'appcache.conventional:Clean'
+            'Users\me\AppData\Local\uv\cache'                         = 'cache.uv:Clean'
+            'Users\me\AppData\Local\Temp\old-download'                = 'temp.user:Clean'
+            'Users\me\AppData\Local\Chat\app-1.0.0'                   = 'stale.squirrel:YourCall'
+            'Users\me\.vscode\extensions\pub.tool-1.0.0'              = 'stale.extension:YourCall'
+            'Users\me\AppData\Local\Docker\wsl\disk\docker_data.vhdx' = 'vdisk.docker:Move'
+        }
+        foreach ($k in $want.Keys) {
+            Assert-True $found.ContainsKey($k) "not found: $k (found: $(($found.Keys | Sort-Object) -join ', '))"
+            Assert-Equal $want[$k] ("{0}:{1}" -f $found[$k].RuleId, $found[$k].Verdict) "wrong rule or verdict for $k"
+        }
+        Assert-Equal $want.Count $found.Count "unexpected findings: $(($found.Keys | Where-Object { -not $want.Contains($_) }) -join ', ')"
+        Assert-Equal 'docker' $found['Users\me\AppData\Local\Docker\wsl\disk\docker_data.vhdx'].Id
+    }
+
+    Test-Case 'fake drive: the cache holding a key is held back for good' {
+        $f = @($fakeScan.Findings | Where-Object { $_.Path -like '*\Keyed\App\Cache' })[0]
+        Assert-True ($f.Suppressed -and $f.SuppressReason -match 'never removed') "not held back for good: $($f.SuppressReason)"
+    }
+
+    Test-Case 'fake drive: the map shows your files and app data' {
+        $names = @($fakeScan.Map.Areas | ForEach-Object { $_.Name })
+        foreach ($n in 'Your files', 'App data') { Assert-True ($names -contains $n) "no '$n' area: $($names -join ', ')" }
+    }
+
+    Test-Case 'fake drive: a second scan gives the same ids' {
+        $again = & $M { param($root) Invoke-WinnowScan -Root $root -NoProgress -RuleId 'appcache.conventional', 'stale.squirrel' } $fake
+        Assert-True ($again.Findings.Count -ge 2) 'the second scan found nothing'
+        foreach ($f in $again.Findings) {
+            $same = @($fakeScan.Findings | Where-Object { $_.RuleId -eq $f.RuleId -and $_.Path -eq $f.Path })
+            Assert-Equal 1 $same.Count "$($f.Path) was not in the first scan"
+            Assert-Equal $same[0].Id $f.Id "the id of $($f.Title) changed between scans"
         }
     }
-}
 
-Test-Case 'every finding carries a consequence, a verdict and a unique id' {
-    $ids = @{}
-    foreach ($f in $scan.Findings) {
-        Assert-True (-not [string]::IsNullOrWhiteSpace($f.Consequence)) "finding $($f.Id) has no consequence"
-        Assert-True ($f.Verdict -in @('Clean', 'Move', 'YourCall', 'HandsOff')) "finding $($f.Id) has verdict '$($f.Verdict)'"
-        Assert-False $ids.ContainsKey($f.Id) "two findings share the id $($f.Id)"
-        $ids[$f.Id] = $true
+    Test-Case 'fake drive: Invoke-WinnowClean -WhatIf changes nothing' {
+        Invoke-WinnowClean -Report $fakeScan -WhatIf -Quiet | Out-Null
+        foreach ($f in $fakeScan.Findings) { Assert-True (Test-Path -LiteralPath $f.Path) "$($f.Path) is gone after -WhatIf" }
     }
+} finally {
+    foreach ($k in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedEnv[$k], 'Process') }
+    & $M { Reset-WinnowGuardPolicy; Import-WinnowRule -Refresh | Out-Null; $script:WinnowLastReport = $null }
 }
 
-Test-Case 'a second scan gives the same ids' {
-    $again = Get-WinnowReport -RuleId @($scan.Findings | Select-Object -First 3 | ForEach-Object { $_.RuleId })
-    foreach ($f in $again.Findings) {
-        $same = @($scan.Findings | Where-Object { $_.RuleId -eq $f.RuleId -and $_.Path -eq $f.Path })
-        if ($same.Count -eq 1) { Assert-Equal $same[0].Id $f.Id "the id of $($f.Title) changed between scans" }
+# ==========================================================================
+Write-Host ''
+Write-Host 'SCAN - this drive' -ForegroundColor White
+# ==========================================================================
+
+if ($env:CI -and -not $env:WINNOW_FULL_SCAN) {
+    Write-Host '  (skipped on CI; run the workflow by hand with full scan on)' -ForegroundColor DarkGray
+} else {
+    $scan = Get-WinnowReport
+    Write-Host ('  (walked {0:N0} files in {1} s; scan {2} s; {3:0}% of {4:0} GB used explained)' -f `
+        $scan.Walk.Files, $scan.Walk.Seconds, $scan.DurationSec, (100 * $scan.Map.ExplainedBytes / $scan.Map.UsedBytes), ($scan.Map.UsedBytes / 1GB)) -ForegroundColor DarkGray
+
+    Test-ScanInvariant -Scan $scan -Label 'this drive'
+
+    Test-Case 'this drive: Invoke-WinnowClean -WhatIf changes nothing' {
+        $before = (Get-PSDrive -Name ($env:SystemDrive.Substring(0, 1))).Free
+        Invoke-WinnowClean -Report $scan -WhatIf -Quiet | Out-Null
+        $after = (Get-PSDrive -Name ($env:SystemDrive.Substring(0, 1))).Free
+        # Allows for background churn.
+        Assert-True ([math]::Abs($after - $before) -lt 200MB) 'free space moved during a WhatIf run'
     }
-}
-
-Test-Case 'Invoke-WinnowClean -WhatIf changes nothing' {
-    $before = (Get-PSDrive -Name ($env:SystemDrive.Substring(0, 1))).Free
-    Invoke-WinnowClean -Report $scan -WhatIf -Quiet | Out-Null
-    $after = (Get-PSDrive -Name ($env:SystemDrive.Substring(0, 1))).Free
-    # Allows for background churn.
-    Assert-True ([math]::Abs($after - $before) -lt 200MB) 'free space moved during a WhatIf run'
 }
 
 # Teardown

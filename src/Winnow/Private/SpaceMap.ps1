@@ -60,7 +60,8 @@ function Get-WinnowSpaceMap {
         [Parameter(Mandatory)][string]$DriveRoot
     )
 
-    $drive = New-Object System.IO.DriveInfo($DriveRoot)
+    $volume = [System.IO.Path]::GetPathRoot($DriveRoot)
+    $drive = New-Object System.IO.DriveInfo($volume)
     $used = [double]($drive.TotalSize - $drive.TotalFreeSpace)
 
     # Each root once, on this drive, as walked.
@@ -101,7 +102,9 @@ function Get-WinnowSpaceMap {
     }
 
     $mft = [double]0
-    try { $mft = [double](New-Object System.IO.FileInfo(($DriveRoot + '$MFT'))).Length } catch { }
+    if ($DriveRoot.Equals($volume, [System.StringComparison]::OrdinalIgnoreCase)) {
+        try { $mft = [double](New-Object System.IO.FileInfo(($volume + '$MFT'))).Length } catch { }
+    }
     if ($mft -gt 0) {
         $areas.Add([pscustomobject]@{ Name = 'File system index (MFT)'; Bytes = $mft; Top = @() })
     }

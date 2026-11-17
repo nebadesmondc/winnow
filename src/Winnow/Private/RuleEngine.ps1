@@ -87,7 +87,9 @@ function Invoke-WinnowScan {
     [CmdletBinding()]
     param(
         [string[]]$RuleId,
-        [switch]$NoProgress
+        [switch]$NoProgress,
+        # A folder in place of the system drive; the tests scan a fake one.
+        [string]$Root
     )
 
     Reset-WinnowProcessMap
@@ -96,6 +98,7 @@ function Invoke-WinnowScan {
     $runId = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4)
     $started = Get-Date
     $driveRoot = Get-WinnowSystemDriveRoot
+    if ($Root) { $driveRoot = ConvertTo-WinnowFullPath $Root }
     $walking = Start-WinnowDriveWalk -Root $driveRoot
 
     $rules = @(Import-WinnowRule)
