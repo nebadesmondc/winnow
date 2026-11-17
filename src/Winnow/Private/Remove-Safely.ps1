@@ -14,6 +14,7 @@ function Remove-WinnowPath {
     param(
         [Parameter(Mandatory)][string]$Path,
         [string[]]$AllowsInsideProject = @(),
+        [switch]$Recycle,
         [switch]$SkipGuard   # test fixtures only
     )
 
@@ -58,6 +59,21 @@ function Remove-WinnowPath {
     $before = [double](Measure-WinnowTree -Path $Path).Bytes
     $method = 'None'
     $reason = $null
+
+    if ($Recycle) {
+        $reason = Move-WinnowToRecycleBin -Path $Path -IsDirectory:$isDir
+        if (-not (Test-WinnowPathExists -Path $Path)) {
+            $outcome.Method = 'RecycleBin'
+            $outcome.Removed = $true
+            # Still on the drive until the Recycle Bin is emptied.
+            $outcome.BytesLeft = $before
+            return $outcome
+        }
+        if (-not $reason) { $reason = 'the Recycle Bin did not take it' }
+        $outcome.Reason = $reason
+        $outcome.BytesLeft = $before
+        return $outcome
+    }
 
     if ($isDir) {
         $stuck = Remove-WinnowLinkInTree -Path $Path
@@ -158,6 +174,36 @@ function Invoke-WinnowMirrorPurge {
         try { [System.IO.Directory]::Delete((ConvertTo-WinnowLongPath $empty), $true) } catch { }
     }
     return $err
+}
+
+function Move-WinnowToRecycleBin {
+    <#
+    .SYNOPSIS
+    Sends a guarded path to the Recycle Bin. Returns $null or an error message.
+
+    .NOTES
+    AllDialogs, not OnlyErrorDialogs: with the quiet option Windows silently
+    deletes for good anything too large for the Recycle Bin. With AllDialogs
+    it asks first.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$IsDirectory
+    )
+
+    try {
+        Add-Type -AssemblyName Microsoft.VisualBasic
+        $ui = [Microsoft.VisualBasic.FileIO.UIOption]::AllDialogs
+        $bin = [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+        $cancel = [Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException
+        if ($IsDirectory) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($Path, $ui, $bin, $cancel) }
+        else { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($Path, $ui, $bin, $cancel) }
+        return $null
+    } catch [System.OperationCanceledException] {
+        return 'cancelled; nothing was moved'
+    } catch {
+        return $_.Exception.Message
+    }
 }
 
 function Remove-WinnowLinkInTree {

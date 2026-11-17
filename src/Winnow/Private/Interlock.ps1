@@ -138,6 +138,35 @@ function Get-WinnowUpdateInFlight {
     return $unique
 }
 
+function Get-WinnowHoldReason {
+    <#
+    .SYNOPSIS
+    Why a path must not be touched right now, or $null: its app is mid-update,
+    a program runs from inside it, or an app it needs closed is running.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowEmptyCollection()][string[]]$RequiresClosed = @(),
+        [object[]]$InFlight = @()
+    )
+
+    foreach ($f in $InFlight) {
+        if (Test-WinnowPathUnder -Path $Path -Root $f.Root) {
+            return "an update is in flight for this application ($($f.Evidence))"
+        }
+    }
+    $locks = @(Get-WinnowPathLock -Path $Path)
+    if ($locks.Count -gt 0) {
+        $names = ($locks | Select-Object -ExpandProperty Name -Unique) -join ', '
+        return "in use: $names runs from inside it; close it and scan again"
+    }
+    $running = @(Test-WinnowProcessRunning -Name $RequiresClosed)
+    if ($running.Count -gt 0) {
+        return "$($running -join ', ') must be closed first"
+    }
+    return $null
+}
+
 function Test-WinnowTreeLocked {
     <#
     .SYNOPSIS
@@ -239,7 +268,7 @@ function Test-WinnowSentinel {
         $real = @($listed | Where-Object { -not ($_ -like '*.pem' -and -not (Test-WinnowPemPrivateKey -Path $_)) })
         # The walk lists a bounded number of paths; any it did not list count.
         if ($real.Count -gt 0 -or $listed.Count -lt $entry.BlockedFiles) {
-            $names = @($real | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Select-Object -First 3)
+            $names = @($real | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Select-Object -Unique -First 3)
             $isDisk = $false
             foreach ($n in $names) {
                 foreach ($vp in $script:WinnowVirtualDiskPatterns) { if ($n -like $vp) { $isDisk = $true } }

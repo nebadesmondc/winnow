@@ -1,33 +1,26 @@
-# Findings and confidence scoring.
+# Findings and verdicts.
 
-$script:WinnowTierOrder = @{
-    'Transient'     = 0
-    'Rebuildable'   = 1
-    'Orphaned'      = 2
-    'Superseded'    = 3
-    'UserData'      = 4
-    'SystemManaged' = 5
+$script:WinnowVerdictNames = [ordered]@{
+    Clean    = 'Clean'
+    Move     = 'Move'
+    YourCall = 'Your call'
+    HandsOff = 'Hands off'
 }
-
-# Tiers Invoke-WinnowClean may act on; the others are report-only.
-$script:WinnowActionableTiers = @('Transient', 'Rebuildable', 'Orphaned', 'Superseded')
 
 function Get-WinnowFindingId {
     <#
     .SYNOPSIS
-    Id from rule, path and scan run; valid only within the scan that made it.
+    Short id from rule and path, stable across scans so an id shown by one
+    command can be used in the next.
     #>
     param(
         [Parameter(Mandatory)][string]$RuleId,
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$RunId
+        [Parameter(Mandatory)][string]$Path
     )
-    $material = ($RuleId + '|' + $Path.ToLower() + '|' + $RunId)
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($material))
-        $hex = -join ($bytes[0..3] | ForEach-Object { $_.ToString('x2') })
-        return 'wnw-' + $hex
+        $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($RuleId + '|' + $Path.ToLowerInvariant()))
+        return 'w-' + (-join ($bytes[0..2] | ForEach-Object { $_.ToString('x2') }))
     } finally { $sha.Dispose() }
 }
 
@@ -36,131 +29,97 @@ function New-WinnowFinding {
     param(
         [Parameter(Mandatory)][object]$Rule,
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$RunId,
         [double]$Bytes = 0,
-        [int]$Files = 0,
+        [double]$FreeableBytes = -1,
+        [long]$Files = 0,
         [datetime]$NewestWrite,
-        [string]$Context = 'LocalFs',
         [string[]]$Evidence = @(),
         [string[]]$Warnings = @(),
-        [double]$Confidence = 1.0,
-        [string]$Tier,
+        [string]$Verdict,
         [string]$Action = 'Delete',
         [string]$Title,
-        [switch]$InsideVirtualDisk
+        [string]$Id,
+        [string[]]$Steps
     )
 
-    $effectiveTier = $Rule.Tier
-    if ($Tier) { $effectiveTier = $Tier }
+    if (-not $Verdict) { $Verdict = $Rule.Verdict }
+    if (-not $Title) { $Title = $Rule.Title }
+    if (-not $Id) { $Id = Get-WinnowFindingId -RuleId $Rule.Id -Path $Path }
+    if (-not $PSBoundParameters.ContainsKey('Steps')) { $Steps = @($Rule.Steps) }
+    if ($FreeableBytes -lt 0) { $FreeableBytes = $Bytes }
 
-    $effectiveTitle = $Rule.Title
-    if ($Title) { $effectiveTitle = $Title }
+    $newest = $null
+    if ($PSBoundParameters.ContainsKey('NewestWrite')) { $newest = $NewestWrite }
 
     return [pscustomobject]@{
-        Id                = Get-WinnowFindingId -RuleId $Rule.Id -Path $Path -RunId $RunId
-        RuleId            = $Rule.Id
-        Title             = $effectiveTitle
-        Category          = $Rule.Category
-        Context           = $Context
-        Path              = $Path
-        Bytes             = [double]$Bytes
-        Files             = $Files
-        NewestWrite       = $NewestWrite
-        Tier              = $effectiveTier
-        Confidence        = [math]::Round($Confidence, 2)
-        Evidence          = @($Evidence)
-        Warnings          = @($Warnings)
-        Consequence       = $Rule.Consequence
-        Docs              = $Rule.Docs
-        Action            = $Action
-        Reclaim           = $Rule.Reclaim
-        RequiresAdmin     = [bool]$Rule.RequiresAdmin
+        Id                  = $Id
+        RuleId              = $Rule.Id
+        Title               = $Title
+        Verdict             = $Verdict
+        Path                = $Path
+        Bytes               = [double]$Bytes
+        FreeableBytes       = [double]$FreeableBytes
+        Files               = $Files
+        NewestWrite         = $newest
+        Evidence            = @($Evidence)
+        Warnings            = @($Warnings)
+        Consequence         = $Rule.Consequence
+        Steps               = @($Steps | Where-Object { $_ })
+        Docs                = $Rule.Docs
+        Action              = $Action
+        Reclaim             = $Rule.Reclaim
+        RequiresClosed      = @($Rule.RequiresClosed)
         AllowsInsideProject = @($Rule.AllowsInsideProject)
-        # False inside a virtual disk: removal frees space in the .vhdx, not the host.
-        HostSpaceReturned = (-not $InsideVirtualDisk.IsPresent)
-        Suppressed        = $false
-        SuppressReason    = $null
-    }
-}
-
-function Get-WinnowConfidence {
-    <#
-    .SYNOPSIS
-    Scores a candidate from 1.0 down and returns the penalties applied.
-    Below 0.60 a finding is never removed.
-    #>
-    param(
-        [string]$ResolveStrategy = 'Path',
-        [switch]$ToolMissing,
-        [datetime]$NewestWrite,
-        [switch]$SentinelDocuments,
-        [int]$InstallNegatives = -1,
-        [switch]$LiveVersionUnknown
-    )
-
-    $score = 1.0
-    $notes = New-Object System.Collections.Generic.List[string]
-
-    if ($ResolveStrategy -eq 'Path') {
-        $score -= 0.10
-        $notes.Add('location found by convention rather than by asking the tool (-0.10)')
-    }
-    if ($ToolMissing) {
-        $score -= 0.15
-        $notes.Add('owning tool is not on PATH (-0.15)')
-    }
-    if ($PSBoundParameters.ContainsKey('NewestWrite') -and $NewestWrite) {
-        if ($NewestWrite -gt (Get-Date).ToUniversalTime().AddHours(-24)) {
-            $score -= 0.10
-            $notes.Add('modified within the last 24 hours (-0.10)')
-        }
-    }
-    if ($SentinelDocuments) {
-        $score -= 0.30
-        $notes.Add('sentinel scan found document-like files (-0.30)')
-    }
-    if ($InstallNegatives -ge 0 -and $InstallNegatives -lt 4) {
-        $score -= 0.25
-        $notes.Add("only $InstallNegatives of 6 install probes were conclusive negatives (-0.25)")
-    }
-    if ($LiveVersionUnknown) {
-        $score -= 0.20
-        $notes.Add('the live version could not be determined from a running process (-0.20)')
-    }
-
-    if ($score -lt 0) { $score = 0 }
-    if ($score -gt 1) { $score = 1 }
-
-    return [pscustomobject]@{
-        Score = [math]::Round($score, 2)
-        Notes = $notes
+        Suppressed          = $false
+        SuppressReason      = $null
     }
 }
 
 function Get-WinnowNotActionableReason {
     <#
     .SYNOPSIS
-    Why a finding may not be acted on, or $null when it may.
+    Why a finding may not be removed, or $null when it may. Your call items
+    are removed only when picked by id.
     #>
-    param([Parameter(Mandatory)][object]$Finding)
+    param(
+        [Parameter(Mandatory)][object]$Finding,
+        [switch]$ById
+    )
 
     if ($Finding.Suppressed) { return "held back: $($Finding.SuppressReason)" }
-    if ($script:WinnowActionableTiers -notcontains $Finding.Tier) {
-        return "$($Finding.Tier) items are report-only; Winnow never removes them"
+    if ($Finding.Action -eq 'ReportOnly') { return 'Winnow only reports this; it never removes it' }
+    switch ($Finding.Verdict) {
+        'Clean'    { return $null }
+        'YourCall' {
+            if ($ById) { return $null }
+            return 'it is your call; Winnow removes it only when you name its id'
+        }
+        'Move'     { return 'it is still needed; it can be moved to another drive, not removed' }
+        'HandsOff' { return 'Windows manages it; Winnow never removes it' }
     }
-    if ($Finding.Action -eq 'ReportOnly') { return 'this rule only reports; it never removes' }
-    if ($Finding.Confidence -lt 0.6) {
-        return ('confidence {0:0.00} is below the 0.60 needed for removal' -f $Finding.Confidence)
-    }
-    return $null
+    return "unknown verdict '$($Finding.Verdict)'"
 }
 
 function Test-WinnowFindingActionable {
     <#
     .SYNOPSIS
-    Whether a finding may be acted on at all, before any user consent.
+    Whether a finding may be removed at all, before any user consent.
     #>
-    param([Parameter(Mandatory)][object]$Finding)
+    param(
+        [Parameter(Mandatory)][object]$Finding,
+        [switch]$ById
+    )
 
-    return ($null -eq (Get-WinnowNotActionableReason -Finding $Finding))
+    return ($null -eq (Get-WinnowNotActionableReason -Finding $Finding -ById:$ById))
+}
+
+function Test-WinnowFindingRemovable {
+    <#
+    .SYNOPSIS
+    Whether a rule's verdict and action could ever lead to removal. Only these
+    findings are guarded, checked for live use and scanned for keys.
+    #>
+    param([Parameter(Mandatory)][string]$Verdict, [string]$Action = 'Delete')
+
+    return (($Verdict -eq 'Clean' -or $Verdict -eq 'YourCall') -and $Action -ne 'ReportOnly')
 }

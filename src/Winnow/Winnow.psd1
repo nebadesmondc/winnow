@@ -12,8 +12,8 @@
     FunctionsToExport = @(
         'Get-WinnowReport'
         'Get-WinnowRule'
+        'Invoke-Winnow'
         'Invoke-WinnowClean'
-        'Start-Winnow'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

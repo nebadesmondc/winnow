@@ -10,8 +10,8 @@ $script:WinnowGuardPolicy    = $null
 $script:WinnowVolumeCache    = $null
 $script:WinnowProcessMap     = $null
 $script:WinnowUninstallCache = $null
-$script:WinnowShortcutCache  = $null
 $script:WinnowRules          = $null
+$script:WinnowLastReport     = $null
 
 # Compiled once per session; a changed SpaceWalker.cs needs a new session.
 if (-not ('Winnow.SpaceWalker' -as [type])) {
@@ -52,6 +52,6 @@ foreach ($f in (Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Public') -F
     $publicNames.Add([System.IO.Path]::GetFileNameWithoutExtension($f.Name))
 }
 
-Set-Alias -Name winnow -Value Start-Winnow
+Set-Alias -Name winnow -Value Invoke-Winnow
 
 Export-ModuleMember -Function $publicNames.ToArray() -Alias 'winnow'

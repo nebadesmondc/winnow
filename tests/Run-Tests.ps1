@@ -75,12 +75,12 @@ Test-Case 'module manifest exists' { Assert-True (Test-Path $manifest) 'Winnow.p
 
 Test-Case 'module imports cleanly' {
     Import-Module $manifest -Force -ErrorAction Stop
-    Assert-True ([bool](Get-Command Start-Winnow -ErrorAction SilentlyContinue)) 'Start-Winnow not exported'
+    Assert-True ([bool](Get-Command Invoke-Winnow -ErrorAction SilentlyContinue)) 'Invoke-Winnow not exported'
 }
 
 Test-Case 'only the four intended commands are exported' {
     $exported = (Get-Module Winnow).ExportedFunctions.Keys | Sort-Object
-    $expected = @('Get-WinnowReport', 'Get-WinnowRule', 'Invoke-WinnowClean', 'Start-Winnow')
+    $expected = @('Get-WinnowReport', 'Get-WinnowRule', 'Invoke-Winnow', 'Invoke-WinnowClean')
     Assert-Equal ($expected -join ',') (($exported) -join ',')
 }
 
@@ -167,10 +167,24 @@ Test-Case 'rules loaded' {
     Assert-True ($n -ge 10) "expected at least 10 rules, loaded $n"
 }
 
-Test-Case 'no rule asks for administrator rights' {
-    $rules = & (Get-Module Winnow) { Import-WinnowRule -Refresh }
-    foreach ($r in $rules) {
-        Assert-False ([bool]$r.RequiresAdmin) "rule '$($r.Id)' requires admin; admin steps must be explained, never run"
+Test-Case 'every rule states a verdict' {
+    foreach ($r in (Get-WinnowRule)) {
+        Assert-True ($r.Verdict -in @('Clean', 'Move', 'Your call', 'Hands off')) "rule '$($r.Id)' has verdict '$($r.Verdict)'"
+    }
+}
+
+Test-Case 'a rule without a verdict or a consequence is not loaded' {
+    $dir = Join-Path ([System.IO.Path]::GetTempPath()) ('winnow-rules-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void](New-Item -ItemType Directory -Path $dir -Force)
+    try {
+        Set-Content -LiteralPath (Join-Path $dir 'x.rules.ps1') -Encoding ascii -Value @(
+            "@(@{ Id = 'no.verdict'; Consequence = 'x' }, @{ Id = 'no.consequence'; Verdict = 'Clean' },"
+            "  @{ Id = 'bad.verdict'; Verdict = 'Maybe'; Consequence = 'x' }, @{ Id = 'good'; Verdict = 'Clean'; Consequence = 'x' })")
+        $loaded = @(& (Get-Module Winnow) { param($d) Import-WinnowRule -RulePath $d -WarningAction SilentlyContinue } $dir)
+        Assert-Equal 'good' (($loaded | ForEach-Object { $_.Id }) -join ',')
+    } finally {
+        Remove-Item -LiteralPath $dir -Recurse -Force
+        & (Get-Module Winnow) { Import-WinnowRule -Refresh | Out-Null }
     }
 }
 
@@ -343,13 +357,13 @@ Test-Case 'a folder holding key material is shown as held back, never removable'
     Set-Content -LiteralPath (Join-Path $d 'client.pem') -Encoding ascii -Value @(
         '-----BEGIN RSA PRIVATE KEY-----', 'bm90IGEgcmVhbCBrZXk=', '-----END RSA PRIVATE KEY-----')
     $rule = [pscustomobject]@{
-        Id = 'test.keyed'; Title = 'test item'; Category = 'AppCache'; Tier = 'Transient'
+        Id = 'test.keyed'; Title = 'test item'; Verdict = 'Clean'; Steps = @()
         MinBytes = 0; MinAgeDays = 0; RequiresClosed = @(); AllowsInsideProject = @()
         ExpectsDocuments = $true; Reclaim = @(@{ Type = 'Delete' }); Consequence = 'test only'
-        Docs = $null; RequiresAdmin = $false
+        Docs = $null
     }
     $cand = [pscustomobject]@{ Path = $d; Strategy = 'Env'; Detail = 'test'; Extra = $null }
-    $f = & $M { param($r, $c) Reset-WinnowProcessMap; ConvertTo-WinnowFinding -Rule $r -Candidate $c -RunId 'test' } $rule $cand
+    $f = & $M { param($r, $c) Reset-WinnowProcessMap; ConvertTo-WinnowFinding -Rule $r -Candidate $c } $rule $cand
     Assert-True ($null -ne $f) 'the folder vanished from the report instead of being explained'
     Assert-True ($f.Suppressed -and $f.SuppressReason -match 'never removed') "not held back as never removable: $($f.SuppressReason)"
     $act = & $M { param($x) Test-WinnowFindingActionable -Finding $x } $f
@@ -453,10 +467,10 @@ Write-Host 'REMOVAL AND REPORTING' -ForegroundColor White
 
 # Minimal rule for driving the pipeline directly
 $fakeRule = [pscustomobject]@{
-    Id = 'test.fake'; Title = 'test item'; Category = 'AppCache'; Tier = 'Transient'
+    Id = 'test.fake'; Title = 'test item'; Verdict = 'Clean'; Steps = @()
     MinBytes = 0; MinAgeDays = 0; RequiresClosed = @(); AllowsInsideProject = @()
     ExpectsDocuments = $false; Reclaim = @(@{ Type = 'Delete' }); Consequence = 'test only'
-    Docs = $null; RequiresAdmin = $false
+    Docs = $null
 }
 
 Test-Case 'last-resort purge handles a path with spaces and stays inside it' {
@@ -557,7 +571,7 @@ Test-Case 'an old-location copy is deleted directly, never via the vendor comman
     $rule = $fakeRule.PSObject.Copy()
     $rule.Reclaim = @(@{ Type = 'VendorCli'; Command = 'cmd'; Args = '/d /c exit 0' }, @{ Type = 'Delete' })
     $cand = [pscustomobject]@{ Path = $old; Strategy = 'Path'; Detail = 'test'; Extra = $null; Primary = $false }
-    $f = & $M { param($r, $c) Reset-WinnowProcessMap; ConvertTo-WinnowFinding -Rule $r -Candidate $c -RunId 'test' } $rule $cand
+    $f = & $M { param($r, $c) Reset-WinnowProcessMap; ConvertTo-WinnowFinding -Rule $r -Candidate $c } $rule $cand
     Assert-Equal 'Delete' $f.Action 'an old-location copy would be handed to the vendor command'
 }
 
@@ -593,7 +607,7 @@ Test-Case 'a folder a running program executes from is held back, not hidden' {
             Start-Sleep -Milliseconds 100
         }
         $cand = [pscustomobject]@{ Path = $app; Strategy = 'Env'; Detail = 'test'; Extra = $null }
-        $f = & $M { param($r, $c) Reset-WinnowProcessMap; ConvertTo-WinnowFinding -Rule $r -Candidate $c -RunId 'test' } $fakeRule $cand
+        $f = & $M { param($r, $c) Reset-WinnowProcessMap; ConvertTo-WinnowFinding -Rule $r -Candidate $c } $fakeRule $cand
         Assert-True ($null -ne $f) 'the in-use folder vanished from the report'
         Assert-True $f.Suppressed 'the in-use folder was not held back'
         Assert-True ($f.SuppressReason -match 'winnow-test-live') "the reason does not name the program: $($f.SuppressReason)"
@@ -605,10 +619,81 @@ Test-Case 'a folder a running program executes from is held back, not hidden' {
     }
 }
 
+Test-Case 'only Clean is removed by default; Your call needs its id; Move and Hands off never' {
+    $check = {
+        param($r, $verdict, $byId)
+        $x = New-WinnowFinding -Rule $r -Path 'C:\nowhere\item' -Bytes 1MB -Verdict $verdict
+        Test-WinnowFindingActionable -Finding $x -ById:$byId
+    }
+    Assert-True (& $M $check $fakeRule 'Clean' $false) 'Clean was not removable'
+    Assert-False (& $M $check $fakeRule 'YourCall' $false) 'Your call was removable without its id'
+    Assert-True (& $M $check $fakeRule 'YourCall' $true) 'Your call was not removable by id'
+    foreach ($v in 'Move', 'HandsOff') {
+        Assert-False (& $M $check $fakeRule $v $true) "$v was removable"
+    }
+}
+
+Test-Case 'a report-only finding is never removable, whatever its verdict' {
+    $act = & $M {
+        param($r)
+        $x = New-WinnowFinding -Rule $r -Path 'C:\nowhere\disk' -Bytes 1MB -Verdict 'YourCall' -Action 'ReportOnly'
+        Test-WinnowFindingActionable -Finding $x -ById
+    } $fakeRule
+    Assert-False $act 'a report-only finding was removable'
+}
+
+Test-Case 'a cache holding documents becomes your call' {
+    $d = Join-Path $sandbox 'doc-cache'
+    [void](New-Item -ItemType Directory -Path $d -Force)
+    foreach ($n in 'a.pdf', 'b.docx', 'c.mp4') { Set-Content -LiteralPath (Join-Path $d $n) -Value 'x' -Encoding ascii }
+    $cand = [pscustomobject]@{ Path = $d; Strategy = 'Env'; Detail = 'test'; Extra = $null }
+    $f = & $M { param($r, $c) Reset-WinnowProcessMap; ConvertTo-WinnowFinding -Rule $r -Candidate $c } $fakeRule $cand
+    Assert-Equal 'YourCall' $f.Verdict 'a cache holding documents stayed Clean'
+    Assert-True (($f.Warnings -join ' ') -match 'document') "no warning about the documents: $($f.Warnings -join '; ')"
+}
+
+Test-Case 'an app a rule needs closed holds the item back' {
+    $d = Join-Path $sandbox 'needs-closed'
+    [void](New-Item -ItemType Directory -Path $d -Force)
+    Set-Content -LiteralPath (Join-Path $d 'x.log') -Value 'x' -Encoding ascii
+    $rule = $fakeRule.PSObject.Copy()
+    $rule.RequiresClosed = @((Get-Process -Id $PID).ProcessName)
+    $cand = [pscustomobject]@{ Path = $d; Strategy = 'Env'; Detail = 'test'; Extra = $null }
+    $f = & $M { param($r, $c) Reset-WinnowProcessMap; ConvertTo-WinnowFinding -Rule $r -Candidate $c } $rule $cand
+    Assert-True $f.Suppressed 'the item was not held back while the app runs'
+    Assert-True ($f.SuppressReason -match 'must be closed') "unexpected reason: $($f.SuppressReason)"
+}
+
+Test-Case 'winnow explain shows what removing an item costs' {
+    $text = & $M {
+        param($r)
+        $x = New-WinnowFinding -Rule $r -Path 'C:\nowhere\explained' -Bytes 3MB -Evidence @('seen by a test') -Steps @('do the thing')
+        $script:WinnowLastReport = [pscustomobject]@{ RunId = 'test'; StartedUtc = (Get-Date).ToUniversalTime(); Findings = @($x); Volumes = @() }
+        Invoke-Winnow explain $x.Id 6>&1 | Out-String
+    } $fakeRule
+    foreach ($want in 'If removed', 'test only', 'seen by a test', '1. do the thing') {
+        Assert-True ($text -match [regex]::Escape($want)) "explain output lacks '$want'"
+    }
+    & $M { $script:WinnowLastReport = $null }
+}
+
+if ($env:CI) {
+    Test-Case 'your call items go to the Recycle Bin' {
+        $d = Join-Path $sandbox 'old-version'
+        [void](New-Item -ItemType Directory -Path $d -Force)
+        Set-Content -LiteralPath (Join-Path $d 'app.dll') -Value 'x' -Encoding ascii
+        $f = & $M { param($r, $p) New-WinnowFinding -Rule $r -Path $p -Bytes 1MB -Verdict 'YourCall' } $fakeRule $d
+        $report = [pscustomobject]@{ RunId = 'test'; Findings = @($f); Volumes = @() }
+        $s = Invoke-WinnowClean -Report $report -Id $f.Id -Quiet -Confirm:$false
+        Assert-Equal 'RecycleBin' $s.Results[0].Method "not sent to the Recycle Bin: $($s.Results[0].Reason)"
+        Assert-False (Test-Path -LiteralPath $d) 'the folder is still there'
+    }
+}
+
 Test-Case 'choosing a held-back item says why, not that it is missing' {
     $f = & $M {
         param($r)
-        $x = New-WinnowFinding -Rule $r -Path 'C:\nowhere\held' -RunId 'test' -Bytes 1MB
+        $x = New-WinnowFinding -Rule $r -Path 'C:\nowhere\held' -Bytes 1MB
         $x.Suppressed = $true
         $x.SuppressReason = 'an update is in flight for this application'
         $x
@@ -628,17 +713,18 @@ Write-Host 'SCAN' -ForegroundColor White
 
 # One full scan, shared by the tests below.
 Write-Host '  (scanning once, reused by the tests below)' -ForegroundColor DarkGray
-$scan = Get-WinnowReport -AsObject
+$scan = Get-WinnowReport
 
 Test-Case 'a scan produces a report and changes nothing' {
-    Assert-Equal 'winnow/report/1' $scan.Schema
+    Assert-Equal 'winnow/report/2' $scan.Schema
     Assert-True ($scan.Volumes.Count -ge 1) 'no volumes reported'
     Assert-True ($null -ne $scan.Findings) 'no findings collection'
     Assert-Equal 0 $scan.RuleErrors.Count "scan reported rule errors: $(($scan.RuleErrors | ForEach-Object { $_.RuleId + ': ' + $_.Message }) -join '; ')"
 }
 
-Test-Case 'every path a rule produced is accepted by the guard' {
+Test-Case 'every path that could be removed is accepted by the guard' {
     foreach ($f in $scan.Findings) {
+        if (-not (& $M { param($x) Test-WinnowFindingRemovable -Verdict $x.Verdict -Action $x.Action } $f)) { continue }
         $v = Guard $f.Path @($f.AllowsInsideProject)
         Assert-True $v.Allowed "rule '$($f.RuleId)' produced a guard-refused path '$($f.Path)': $($v.Reason)"
     }
@@ -658,19 +744,21 @@ Test-Case 'no space is counted twice: no finding sits inside another' {
     }
 }
 
-Test-Case 'every finding carries a consequence and a tier' {
+Test-Case 'every finding carries a consequence, a verdict and a unique id' {
+    $ids = @{}
     foreach ($f in $scan.Findings) {
         Assert-True (-not [string]::IsNullOrWhiteSpace($f.Consequence)) "finding $($f.Id) has no consequence"
-        Assert-True ($null -ne $f.Tier) "finding $($f.Id) has no tier"
+        Assert-True ($f.Verdict -in @('Clean', 'Move', 'YourCall', 'HandsOff')) "finding $($f.Id) has verdict '$($f.Verdict)'"
+        Assert-False $ids.ContainsKey($f.Id) "two findings share the id $($f.Id)"
+        $ids[$f.Id] = $true
     }
 }
 
-Test-Case 'no finding is tiered UserData or SystemManaged and also actionable' {
-    foreach ($f in $scan.Findings) {
-        if ($f.Tier -eq 'UserData' -or $f.Tier -eq 'SystemManaged') {
-            $act = & $M { param($x) Test-WinnowFindingActionable -Finding $x } $f
-            Assert-False $act "a $($f.Tier) finding was actionable"
-        }
+Test-Case 'a second scan gives the same ids' {
+    $again = Get-WinnowReport -RuleId @($scan.Findings | Select-Object -First 3 | ForEach-Object { $_.RuleId })
+    foreach ($f in $again.Findings) {
+        $same = @($scan.Findings | Where-Object { $_.RuleId -eq $f.RuleId -and $_.Path -eq $f.Path })
+        if ($same.Count -eq 1) { Assert-Equal $same[0].Id $f.Id "the id of $($f.Title) changed between scans" }
     }
 }
 
