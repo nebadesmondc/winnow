@@ -1,0 +1,63 @@
+# Contributing
+
+## Rules
+
+- Every removal goes through `Remove-WinnowPath` in `src/Winnow/Private/Remove-Safely.ps1`. No other file deletes or moves anything.
+- No literal paths in rules. Locations come from the tool, its environment variable or its default under a root such as `LOCALAPPDATA`.
+- Every rule has a `Consequence`: one sentence on what removing the item costs.
+- No network calls, elevation, services, scheduled tasks or registry writes.
+- Windows PowerShell 5.1 syntax: no `? :`, `??`, `&&` or classes.
+
+The test suite enforces each of these.
+
+## Tests and lint
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 -Detail
+Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
+```
+
+The tests need nothing installed. Fixtures go in a temporary `%LOCALAPPDATA%\winnow-selftest-*` folder, and one read-only scan of the machine checks every path the rules produce.
+
+## Adding a rule
+
+Rules live in `src/Winnow/Rules/*.rules.ps1`:
+
+```powershell
+@{
+    Id       = 'cache.pip'
+    Title    = 'pip wheel cache'
+    Category = 'PackageCache'              # PackageCache | AppCache | Installer
+    Tier     = 'Rebuildable'               # Transient | Rebuildable
+    Resolve  = @(
+        @{ Type = 'Cli';  Command = 'pip'; Args = 'cache dir'; TimeoutSec = 20 }
+        @{ Type = 'Env';  Name = 'PIP_CACHE_DIR' }
+        @{ Type = 'Path'; Base = 'LOCALAPPDATA'; Sub = 'pip\cache' }
+    )
+    Reclaim  = @(
+        @{ Type = 'VendorCli'; Command = 'pip'; Args = 'cache purge' }
+        @{ Type = 'Delete' }
+    )
+    MinBytes    = 25MB
+    Consequence = 'The next pip install rebuilds or re-downloads wheels. Installed packages and virtual environments are untouched.'
+    Docs        = 'https://pip.pypa.io/en/stable/cli/pip_cache/'
+}
+```
+
+`Resolve` steps are tried in order and every existing folder is kept. The first is the cache in use. Later ones are reported as old locations and deleted directly, never through the tool's own command. `Cli` and `Env` steps can add `Sub` to target a folder inside the tool's root.
+
+| Field | Use |
+|---|---|
+| `Target = 'Children'`, `Keep = @(...)` | Offer each child folder separately, except those named |
+| `Target = 'Glob'`, `Glob = '*.nupkg'` | Offer matching files in the root |
+| `MinAgeDays` | Skip anything modified more recently |
+| `RequiresClosed = @('java')` | Warn while this process runs |
+| `AllowsInsideProject = @('node_modules')` | Allow this build folder inside a source project |
+| `ExpectsDocuments = $true` | Skip the documents check (never the key check) |
+| `Discover = { ... }` | A detector instead of `Resolve`; runs after tool rules and skips folders they own |
+
+A rule must never target a tool's settings, credentials, installed packages or virtual environments.
+
+## Pull requests
+
+Open an issue first for anything larger than a rule or a fix. Report security problems through [SECURITY.md](SECURITY.md).
