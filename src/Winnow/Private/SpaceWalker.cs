@@ -26,6 +26,13 @@ namespace Winnow
         public int Threads = 8;
         // Off for FAT and ReFS, whose 64-bit file ids are not unique.
         public bool DedupeHardLinks = true;
+        // Read while the walk runs, for a progress display.
+        public WalkProgress Progress;
+    }
+
+    public sealed class WalkProgress
+    {
+        public long Folders;
     }
 
     public sealed class DirSize
@@ -255,6 +262,7 @@ namespace Winnow
                         }
 
                         children.Clear();
+                        if (o.Progress != null) Interlocked.Increment(ref o.Progress.Folders);
                         try
                         {
                             ListFolder(path, index, frame, buffer, children, walk, seen, extraNames,

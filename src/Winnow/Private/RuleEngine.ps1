@@ -96,7 +96,7 @@ function Invoke-WinnowScan {
     $runId = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4)
     $started = Get-Date
     $driveRoot = Get-WinnowSystemDriveRoot
-    $walkTask = Start-WinnowDriveWalk -Root $driveRoot
+    $walking = Start-WinnowDriveWalk -Root $driveRoot
 
     $rules = @(Import-WinnowRule)
     if ($RuleId) { $rules = @($rules | Where-Object { $RuleId -contains $_.Id }) }
@@ -122,12 +122,13 @@ function Invoke-WinnowScan {
     # Apps mid-update are held back for the whole run.
     $inFlight = @(Get-WinnowUpdateInFlight)
 
-    while (-not $walkTask.Wait(250)) {
+    while (-not $walking.Task.Wait(250)) {
         if (-not $NoProgress) {
-            Write-Progress -Activity 'Winnow' -Status ('Measuring {0} ({1:0} s)' -f $driveRoot, ((Get-Date) - $started).TotalSeconds)
+            Write-Progress -Activity 'Winnow' -Status ('Measuring {0}: {1:N0} folders ({2:0} s)' -f `
+                $driveRoot, $walking.Progress.Folders, ((Get-Date) - $started).TotalSeconds)
         }
     }
-    $walk = $walkTask.Result
+    $walk = $walking.Task.Result
     $script:WinnowWalk = $walk
 
     foreach ($rule in $rules) {

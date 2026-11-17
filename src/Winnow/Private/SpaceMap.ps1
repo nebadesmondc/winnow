@@ -8,8 +8,15 @@ function Get-WinnowSystemDriveRoot {
 }
 
 function Start-WinnowDriveWalk {
+    <#
+    .SYNOPSIS
+    Starts the drive walk in the background. Returns the task and a progress
+    object whose Folders count grows as the walk runs.
+    #>
     param([Parameter(Mandatory)][string]$Root)
-    return [Winnow.SpaceWalker]::Start((New-WinnowWalkOptions -Root $Root -Threads 16 -KeepDepth 3))
+    $o = New-WinnowWalkOptions -Root $Root -Threads 16 -KeepDepth 3
+    $o.Progress = New-Object Winnow.WalkProgress
+    return [pscustomobject]@{ Task = [Winnow.SpaceWalker]::Start($o); Progress = $o.Progress }
 }
 
 function Get-WinnowMapArea {
