@@ -5,7 +5,7 @@
     Author            = 'Winnow contributors'
     CompanyName       = 'Winnow contributors'
     Copyright         = '(c) Winnow contributors. MIT License.'
-    Description       = 'Finds the space developer tools quietly take on your Windows system drive - package caches, app caches, leftovers - and reclaims it safely: read-only by default, offline, no admin rights, and every removal explained first.'
+    Description       = 'Shows where the space on your Windows system drive went and gets it back safely: a read-only map of the drive, a verdict and a cost for every large item, and guarded removal of only what you approve. Offline, no admin rights.'
 
     PowerShellVersion = '5.1'
 
@@ -23,7 +23,7 @@
         PSData = @{
             Tags         = @('Disk', 'DiskSpace', 'Cleanup', 'Cache', 'Developer', 'Windows')
             LicenseUri   = 'https://opensource.org/license/mit'
-            ReleaseNotes = 'Pre-release. Scan and clean of developer tool caches with a deny-first guard; see README.md for status.'
+            ReleaseNotes = 'Pre-release.'
         }
     }
 }
