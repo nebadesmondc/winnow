@@ -20,7 +20,7 @@ jobs:
           - name: PowerShell 7
             exe: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run the test suite
         shell: cmd
         run: ${{ matrix.exe }} -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 -Detail
@@ -29,7 +29,7 @@ jobs:
     name: PSScriptAnalyzer
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Analyze
         shell: pwsh
         run: |
