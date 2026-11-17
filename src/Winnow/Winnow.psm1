@@ -27,6 +27,7 @@ $privateOrder = @(
     'Remove-Safely.ps1' # the ONLY delete primitive in the codebase
     'Discovery.ps1'     # tool locations, installed programs
     'Detectors.ps1'     # detectors that find items by name and layout
+    'SystemFiles.ps1'   # pagefile and hibernation file
     'Finding.ps1'       # findings and verdicts
     'SpaceMap.ps1'      # drive walk and the space map
     'Format.ps1'        # console rendering

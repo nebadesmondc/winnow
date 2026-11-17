@@ -761,6 +761,15 @@ Test-Case 'the map places every measured byte once' {
     Assert-True ($scan.Map.NotExplained.Bytes -ge 0) 'negative unexplained space'
 }
 
+Test-Case 'the pagefile and hibernation file are explained, never removable' {
+    foreach ($f in @($scan.Findings | Where-Object { $_.RuleId -like 'system.*' })) {
+        Assert-False (& $M { param($x) Test-WinnowFindingActionable -Finding $x -ById } $f) "$($f.Title) was removable"
+        Assert-True (@($f.Steps).Count -gt 0) "$($f.Title) has no steps"
+    }
+    $c = & $M { Get-WinnowPagefileCandidate }
+    Assert-True ($c.Path -like '*\pagefile.sys' -and $c.Extra.Id -eq 'pagefile') "unexpected pagefile candidate: $($c.Path)"
+}
+
 Test-Case 'every path that could be removed is accepted by the guard' {
     foreach ($f in $scan.Findings) {
         if (-not (& $M { param($x) Test-WinnowFindingRemovable -Verdict $x.Verdict -Action $x.Action } $f)) { continue }
