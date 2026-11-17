@@ -28,6 +28,7 @@ $privateOrder = @(
     'Discovery.ps1'     # tool locations, installed programs
     'Detectors.ps1'     # detectors that find items by name and layout
     'SystemFiles.ps1'   # pagefile and hibernation file
+    'VirtualDisks.ps1'  # WSL, Docker and other virtual machine disks
     'Finding.ps1'       # findings and verdicts
     'SpaceMap.ps1'      # drive walk and the space map
     'Format.ps1'        # console rendering

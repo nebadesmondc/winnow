@@ -178,6 +178,9 @@ function Show-WinnowExplain {
 
     if ($f.Suppressed) { & $section 'Held back' @($f.SuppressReason) 'Warn' }
     & $section 'If removed' @($f.Consequence)
+    $changed = $null
+    if ($f.NewestWrite) { $changed = '{0:yyyy-MM-dd}' -f ([datetime]$f.NewestWrite).ToLocalTime() }
+    & $section 'Last change' @($changed) 'Dim'
     & $section 'Evidence' @($f.Evidence) 'Dim'
     & $section 'Warnings' @($f.Warnings | ForEach-Object { "! $_" }) 'Warn'
     $i = 0

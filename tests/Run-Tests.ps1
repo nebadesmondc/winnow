@@ -247,6 +247,7 @@ $mustRefuse = @(
     @{ P = (Join-Path $lad 'thing\vault.kdbx');          Why = 'a password database' }
     @{ P = (Join-Path $lad 'thing\cert.pfx');            Why = 'a certificate' }
     @{ P = (Join-Path $lad 'thing\.env');                Why = 'an env file' }
+    @{ P = (Join-Path $lad 'Docker\wsl\disk\docker_data.vhdx'); Why = 'a virtual disk' }
     @{ P = $lad;                                         Why = 'an allow-root itself' }
     @{ P = $ad;                                          Why = 'an allow-root itself' }
     @{ P = $env:TEMP;                                    Why = 'an allow-root itself' }
@@ -716,6 +717,38 @@ Test-Case 'cache folders are found by name, never inside packages, state or anot
     Assert-True ($titles -contains 'Thing - Cache') "a Store app is not named by its package: $($titles -join ', ')"
 }
 
+Test-Case 'virtual disks: WSL and Docker are told apart from other disks' {
+    $base = Join-Path $sandbox 'vdisks'
+    foreach ($d in 'distro', 'Docker\wsl\disk', 'vm') { [void](New-Item -ItemType Directory -Path (Join-Path $base $d) -Force) }
+    foreach ($f in 'distro\ext4.vhdx', 'Docker\wsl\disk\docker_data.vhdx', 'vm\machine.vmdk') {
+        Set-Content -LiteralPath (Join-Path $base $f) -Value 'not a disk' -Encoding ascii
+    }
+    $distros = @([pscustomobject]@{ Name = 'Test-Distro'; Disk = (Join-Path $base 'distro\ext4.vhdx'); Default = $true })
+    $found = & $M {
+        param($b, $d)
+        $o = New-WinnowWalkOptions -Root $b -KeepMinBytes 0 -KeepDepth 10
+        $o.NotableMinBytes = 0
+        $w = [Winnow.SpaceWalker]::Walk($o)
+        $claimed = New-Object System.Collections.Generic.List[string]
+        $out = @{}
+        foreach ($pair in @(
+                @('wsl', @(Get-WinnowWslDiskCandidate -Distros $d)),
+                @('docker', @(Get-WinnowDockerDiskCandidate -Walk $w -Distros $d)),
+                @('other', @(Get-WinnowOtherDiskCandidate -Walk $w)))) {
+            $kept = @(Select-WinnowUnclaimedCandidate -Candidate $pair[1] -Claimed $claimed)
+            foreach ($c in $kept) { $claimed.Add($c.Path) }
+            $out[$pair[0]] = $kept
+        }
+        $out
+    } $base $distros
+    Assert-Equal 1 $found.wsl.Count 'the WSL distribution was not found once'
+    Assert-Equal 'wsl-test-distro' $found.wsl[0].Extra.Id
+    Assert-True (($found.wsl[0].Extra.Steps -join ' ') -match 'wsl --manage Test-Distro --move') 'the move step does not name the distribution'
+    Assert-Equal 1 $found.docker.Count 'the Docker disk was not found once'
+    Assert-Equal 'docker' $found.docker[0].Extra.Id
+    Assert-Equal 'machine.vmdk' (($found.other | ForEach-Object { [System.IO.Path]::GetFileName($_.Path) }) -join ',')
+}
+
 Test-Case 'choosing a held-back item says why, not that it is missing' {
     $f = & $M {
         param($r)
@@ -759,6 +792,14 @@ Test-Case 'the map places every measured byte once' {
     Assert-True ($gap -lt 0.01 * $scan.Map.UsedBytes) ('items and areas add up to {0:N2} GB, the walk measured {1:N2} GB' -f ($sum / 1GB), ($scan.Map.ExplainedBytes / 1GB))
     Assert-True ($scan.Map.ExplainedBytes -le $scan.Map.UsedBytes) 'the map explains more than is used'
     Assert-True ($scan.Map.NotExplained.Bytes -ge 0) 'negative unexplained space'
+}
+
+Test-Case 'nothing found as Move or Hands off, and no virtual disk, is removable' {
+    foreach ($f in $scan.Findings) {
+        if ($f.Verdict -in @('Move', 'HandsOff') -or $f.RuleId -like 'vdisk.*') {
+            Assert-False (& $M { param($x) Test-WinnowFindingActionable -Finding $x -ById } $f) "$($f.Title) was removable"
+        }
+    }
 }
 
 Test-Case 'the pagefile and hibernation file are explained, never removable' {

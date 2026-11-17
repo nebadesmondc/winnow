@@ -93,6 +93,7 @@ function Get-WinnowGuardPolicy {
         UserContentRoots       = $userContent
         CredentialDirNames     = $credentialDirNames
         CredentialFilePatterns = $credentialFilePatterns
+        VirtualDiskPatterns    = $script:WinnowVirtualDiskPatterns
         ProjectMarkers         = $projectMarkers
         AllowRoots             = $allowRoots
         MinSegments            = 3
@@ -213,9 +214,12 @@ function Test-WinnowGuard {
         }
     }
 
-    # 9. Key and secret files
+    # 9. Key, secret and virtual disk files
     foreach ($pat in $policy.CredentialFilePatterns) {
         if ($leaf -like $pat) { return (_deny "credential or key file pattern '$pat'" $canon) }
+    }
+    foreach ($pat in $policy.VirtualDiskPatterns) {
+        if ($leaf -like $pat) { return (_deny "virtual disk file '$pat'" $canon) }
     }
 
     # 10. Links, and paths reached through one (e.g. "All Users" -> ProgramData)
