@@ -80,6 +80,14 @@ function Get-WinnowGuardPolicy {
         'pyproject.toml', 'Cargo.toml', 'go.mod', 'package.json', 'CMakeLists.txt'
     )
 
+    # Installed editor extensions ship a package.json but are not source.
+    $extensionRoots = New-Object System.Collections.Generic.List[string]
+    if ($userHome) {
+        foreach ($e in @('.vscode', '.vscode-insiders', '.cursor', '.windsurf')) {
+            $extensionRoots.Add((Join-Path $userHome "$e\extensions"))
+        }
+    }
+
     # A path must be under one of these, and not be one of them
     $allowRoots = New-Object System.Collections.Generic.List[string]
     foreach ($p in @($local, $roaming, $temp, $userHome, $progData)) {
@@ -95,6 +103,7 @@ function Get-WinnowGuardPolicy {
         CredentialFilePatterns = $credentialFilePatterns
         VirtualDiskPatterns    = $script:WinnowVirtualDiskPatterns
         ProjectMarkers         = $projectMarkers
+        ExtensionRoots         = $extensionRoots
         AllowRoots             = $allowRoots
         MinSegments            = 3
         ProjectLookupDepth     = 4
@@ -247,7 +256,13 @@ function Test-WinnowGuard {
     for ($i = 0; $i -le $policy.ProjectLookupDepth; $i++) {
         if (-not $probe) { break }
         if ($probe.TrimEnd('\').Equals($root.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) { break }
+        $parent = [System.IO.Path]::GetDirectoryName($probe)
+        $isExtension = $false
+        foreach ($x in $policy.ExtensionRoots) {
+            if ($parent -and $parent.Equals($x, [System.StringComparison]::OrdinalIgnoreCase)) { $isExtension = $true }
+        }
         foreach ($m in $policy.ProjectMarkers) {
+            if ($isExtension -and $m -eq 'package.json') { continue }
             if (Test-WinnowPathExists -Path (Join-Path $probe $m)) {
                 $projectHit = [pscustomobject]@{ Dir = $probe; Marker = $m }
                 break

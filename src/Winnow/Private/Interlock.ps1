@@ -127,6 +127,20 @@ function Get-WinnowUpdateInFlight {
         }
     }
 
+    # An installed VS Code update waits for a restart; its builds and the
+    # installer it downloaded to Temp stay until then.
+    foreach ($install in @(Get-WinnowVSCodeInstall)) {
+        if (-not $install.Pending) { continue }
+        $why = "$($install.Name) $($install.Pending.Version) is installed and waits for a restart"
+        $found.Add([pscustomobject]@{ Root = $install.Path; Evidence = $why })
+        $temp = Get-WinnowEnvRoot 'TEMP'
+        if ($temp) {
+            foreach ($t in (Get-WinnowChildDirectory -Path $temp)) {
+                if ($t.Name -like 'vscode-*') { $found.Add([pscustomobject]@{ Root = $t.Path; Evidence = $why }) }
+            }
+        }
+    }
+
     $seen = @{}
     $unique = New-Object System.Collections.Generic.List[object]
     foreach ($f in $found) {

@@ -39,9 +39,11 @@ function New-WinnowFinding {
         [string]$Action = 'Delete',
         [string]$Title,
         [string]$Id,
-        [string[]]$Steps
+        [string[]]$Steps,
+        [AllowEmptyCollection()][string[]]$RequiresClosed
     )
 
+    if (-not $PSBoundParameters.ContainsKey('RequiresClosed')) { $RequiresClosed = @($Rule.RequiresClosed) }
     if (-not $Verdict) { $Verdict = $Rule.Verdict }
     if (-not $Title) { $Title = $Rule.Title }
     if (-not $Id) { $Id = Get-WinnowFindingId -RuleId $Rule.Id -Path $Path }
@@ -68,7 +70,7 @@ function New-WinnowFinding {
         Docs                = $Rule.Docs
         Action              = $Action
         Reclaim             = $Rule.Reclaim
-        RequiresClosed      = @($Rule.RequiresClosed)
+        RequiresClosed      = @($RequiresClosed | Where-Object { $_ })
         AllowsInsideProject = @($Rule.AllowsInsideProject)
         Suppressed          = $false
         SuppressReason      = $null

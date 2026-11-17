@@ -367,6 +367,7 @@ function ConvertTo-WinnowFinding {
     if ($toolMissing) { $evidence.Add("$toolMissing is not on PATH; removal deletes the folder directly") }
     foreach ($e in @(Get-WinnowExtra $Candidate 'Evidence')) { if ($e) { $evidence.Add($e) } }
 
+    $requiresClosed = @(@($Rule.RequiresClosed) + @(Get-WinnowExtra $Candidate 'RequiresClosed') | Where-Object { $_ })
     $suppressReason = $null
     if ($removable) {
         $s = Test-WinnowSentinel -Path $path -Walk $Walk
@@ -374,7 +375,7 @@ function ConvertTo-WinnowFinding {
             $suppressReason = 'never removed: it ' + $s.Reason
             if ($s.Samples) { $suppressReason += ' (' + ($s.Samples -join ', ') + ')' }
         } else {
-            $suppressReason = Get-WinnowHoldReason -Path $path -RequiresClosed @($Rule.RequiresClosed) -InFlight $InFlight
+            $suppressReason = Get-WinnowHoldReason -Path $path -RequiresClosed $requiresClosed -InFlight $InFlight
         }
         if ($s.NeedsConfirm -and -not $Rule.ExpectsDocuments -and $verdict -eq 'Clean') {
             $verdict = 'YourCall'
@@ -386,15 +387,16 @@ function ConvertTo-WinnowFinding {
     }
 
     $findingArgs = @{
-        Rule          = $Rule
-        Path          = $path
-        Bytes         = $entry.Bytes
-        FreeableBytes = $entry.FreeableBytes
-        Files         = $entry.Files
-        Evidence      = $evidence
-        Warnings      = $warnings
-        Verdict       = $verdict
-        Action        = $action
+        Rule           = $Rule
+        Path           = $path
+        Bytes          = $entry.Bytes
+        FreeableBytes  = $entry.FreeableBytes
+        Files          = $entry.Files
+        Evidence       = $evidence
+        Warnings       = $warnings
+        Verdict        = $verdict
+        Action         = $action
+        RequiresClosed = $requiresClosed
     }
     if ($newest) { $findingArgs['NewestWrite'] = $newest }
     foreach ($k in @('Title', 'Id', 'Steps')) {

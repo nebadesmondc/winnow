@@ -749,6 +749,68 @@ Test-Case 'virtual disks: WSL and Docker are told apart from other disks' {
     Assert-Equal 'machine.vmdk' (($found.other | ForEach-Object { [System.IO.Path]::GetFileName($_.Path) }) -join ',')
 }
 
+function New-Fixture {
+    param([string]$Path, [string]$Content = 'x')
+    [void](New-Item -ItemType Directory -Path (Split-Path $Path -Parent) -Force)
+    Set-Content -LiteralPath $Path -Value $Content -Encoding ascii
+}
+
+Test-Case 'stale versions: only builds older than the one in use; a newer one is a pending update' {
+    $programs = Join-Path $sandbox 'programs'
+    $app = Join-Path $programs 'Fake Code'
+    New-Fixture (Join-Path $app 'Code.VisualElementsManifest.xml') '<VisualElements Square150x150Logo="aaaaaaaaaa\resources\app\icon.png" />'
+    foreach ($b in @(@('aaaaaaaaaa', '1.20.0'), @('bbbbbbbbbb', '1.9.0'), @('cccccccccc', '1.21.0'), @('notabuild1', '1.0.0'))) {
+        New-Fixture (Join-Path $app "$($b[0])\resources\app\product.json") ('{"version":"' + $b[1] + '"}')
+    }
+    $install = @(& $M { param($p) Get-WinnowVSCodeInstall -ProgramsRoot $p } $programs)
+    Assert-Equal 1 $install.Count 'the install was not recognised'
+    Assert-Equal 'aaaaaaaaaa' $install[0].InUse.Name 'the build in use is not the one the manifest names'
+    Assert-Equal 'cccccccccc' $install[0].Pending.Name 'the newer build was not taken as a pending update'
+    $c = @(& $M { param($p) Get-WinnowVSCodeBuildCandidate -ProgramsRoot $p } $programs)
+    Assert-Equal 'bbbbbbbbbb' (($c | ForEach-Object { Split-Path $_.Path -Leaf }) -join ',')
+}
+
+Test-Case 'stale versions: extensions the editor no longer loads' {
+    $home1 = Join-Path $sandbox 'home'
+    $ext = Join-Path $home1 '.vscode\extensions'
+    foreach ($d in 'pub.tool-1.0.0', 'pub.tool-1.1.0', 'other.thing-2.0.0', 'gone.ext-0.1.0-win32-x64') { New-Fixture (Join-Path $ext "$d\package.json") '{}' }
+    New-Fixture (Join-Path $ext 'extensions.json') '[{"relativeLocation":"pub.tool-1.1.0"},{"location":{"path":"/c:/x/other.thing-3.0.0"}}]'
+    New-Fixture (Join-Path $ext '.obsolete') '{"gone.ext-0.1.0-win32-x64":true}'
+    $c = @(& $M { param($h) Get-WinnowStaleExtensionCandidate -UserHome $h } $home1)
+    Assert-Equal 'gone.ext-0.1.0-win32-x64,other.thing-2.0.0,pub.tool-1.0.0' (($c | ForEach-Object { Split-Path $_.Path -Leaf } | Sort-Object) -join ',')
+    Assert-Equal 'Code' (@($c[0].Extra.RequiresClosed) -join ',') 'the editor is not required to be closed'
+}
+
+Test-Case 'stale versions: older Squirrel app versions, compared as versions' {
+    $local = Join-Path $sandbox 'squirrel'
+    New-Fixture (Join-Path $local 'Chat\Update.exe')
+    foreach ($v in 'app-1.2.0', 'app-1.10.0', 'packages') { New-Fixture (Join-Path $local "Chat\$v\x.dll") }
+    New-Fixture (Join-Path $local 'NoUpdater\app-0.1.0\x.dll'); New-Fixture (Join-Path $local 'NoUpdater\app-0.2.0\x.dll')
+    $c = @(& $M { param($r) Get-WinnowSquirrelVersionCandidate -Root $r } $local)
+    Assert-Equal 'app-1.2.0' (($c | ForEach-Object { Split-Path $_.Path -Leaf }) -join ',')
+}
+
+Test-Case 'an installed editor extension is not a source project; one with .git is' {
+    $home1 = Join-Path $sandbox 'guard-home'
+    New-Fixture (Join-Path $home1 '.vscode\extensions\pub.tool-1.0.0\package.json') '{}'
+    New-Fixture (Join-Path $home1 '.vscode\extensions\dev.tool-1.0.0\.git\HEAD')
+    New-Fixture (Join-Path $home1 'work\app\package.json') '{}'
+    $saved = $env:USERPROFILE
+    try {
+        $env:USERPROFILE = $home1
+        & $M { Reset-WinnowGuardPolicy }
+        $v1 = Guard (Join-Path $home1 '.vscode\extensions\pub.tool-1.0.0')
+        Assert-True $v1.Allowed "an installed extension was refused: $($v1.Reason)"
+        $v2 = Guard (Join-Path $home1 '.vscode\extensions\dev.tool-1.0.0')
+        Assert-False $v2.Allowed 'an extension folder holding a git checkout was allowed'
+        $v3 = Guard (Join-Path $home1 'work\app')
+        Assert-False $v3.Allowed 'a project with package.json was allowed'
+    } finally {
+        $env:USERPROFILE = $saved
+        & $M { Reset-WinnowGuardPolicy }
+    }
+}
+
 Test-Case 'choosing a held-back item says why, not that it is missing' {
     $f = & $M {
         param($r)
