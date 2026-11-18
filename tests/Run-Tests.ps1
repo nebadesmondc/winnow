@@ -113,6 +113,20 @@ Test-Case 'Winnow never unregisters a WSL distribution' {
     Assert-NoPattern -What 'unregister found' -Pattern @('(?i)--unregister')
 }
 
+Test-Case 'a WSL name reaches wsl only when WSL itself allows it' {
+    $m = Get-Module Winnow
+    foreach ($n in 'Ubuntu-24.04', 'my_distro.2') {
+        $threw = $false
+        try { & $m { param($x) Assert-WinnowWslName -Name $x } $n } catch { $threw = $true }
+        Assert-False $threw "a valid name was refused: $n"
+    }
+    foreach ($n in 'a b', '"x"', 'x --unregister y', 'x;y', '-d') {
+        $threw = $false
+        try { & $m { param($x) Assert-WinnowWslName -Name $x } $n } catch { $threw = $true }
+        Assert-True $threw "an unsafe name was accepted: $n"
+    }
+}
+
 Test-Case 'a move sets only variables its rules name, never PATH or a Windows variable' {
     $m = Get-Module Winnow
     foreach ($n in 'PATH', 'Path', 'TEMP', 'WINNOW_NOT_A_RULE_VARIABLE') {

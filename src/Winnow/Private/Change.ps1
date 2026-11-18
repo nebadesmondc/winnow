@@ -383,10 +383,18 @@ function Set-WinnowUserVariable {
     }
 }
 
+function Assert-WinnowWslName {
+    # wsl -d and --terminate keep quotes as part of the name, so names are
+    # passed bare and must be ones WSL itself allows.
+    param([Parameter(Mandatory)][string]$Name)
+    if ($Name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "Winnow: '$Name' is not a WSL distribution name Winnow can pass to wsl." }
+}
+
 function Stop-WinnowWslDistro {
     # Stops one distribution, as wsl --terminate does; its processes end.
     param([Parameter(Mandatory)][string]$Name)
-    $null = Invoke-WinnowProcess -Command 'wsl' -Arguments ('--terminate "{0}"' -f $Name) -TimeoutSec 60
+    Assert-WinnowWslName -Name $Name
+    $null = Invoke-WinnowProcess -Command 'wsl' -Arguments ('--terminate {0}' -f $Name) -TimeoutSec 60
 }
 
 function Move-WinnowWslDisk {
@@ -400,7 +408,8 @@ function Move-WinnowWslDisk {
         [Parameter(Mandatory)][string]$Destination
     )
 
-    $r = Invoke-WinnowProcess -Command 'wsl' -Arguments ('--manage "{0}" --move "{1}"' -f $Name, $Destination) -TimeoutSec 7200
+    Assert-WinnowWslName -Name $Name
+    $r = Invoke-WinnowProcess -Command 'wsl' -Arguments ('--manage {0} --move "{1}"' -f $Name, $Destination) -TimeoutSec 7200
     if ($r.ExitCode -eq 0) { return $null }
     if ($r.TimedOut) { return 'WSL did not finish within two hours' }
     $msg = (@($r.Output, $r.Error) | Where-Object { $_ }) -join ' '

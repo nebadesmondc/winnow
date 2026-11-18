@@ -217,6 +217,7 @@ function Get-WinnowMovePlan {
     }
 
     if ($m.Kind -eq 'Wsl') {
+        try { Assert-WinnowWslName -Name $m.Distro } catch { return (& $fail 'its name has characters Winnow does not pass to wsl') }
         if (-not (Test-WinnowWslMoveSupported)) { return (& $fail 'this WSL cannot move distributions; wsl --update brings a version that can') }
         return $plan
     }
@@ -588,11 +589,18 @@ function Stop-WinnowWslForMove {
     }
 
     # WSL keeps a stopped distribution's disk attached while its VM runs, for
-    # other distributions or until the VM idles out.
-    for ($i = 0; $i -lt 90; $i++) {
-        if ($i -eq 15 -and @(Get-WinnowWslRunning | Where-Object { $_ -ne $Name }).Count -gt 0) { break }
-        if (Test-WinnowFileFree -Path $Disk) { return $null }
-        [System.Threading.Thread]::Sleep(1000)
+    # other distributions or until the VM idles out (60 s by default, measured
+    # up to about 140 s).
+    $activity = "Waiting for WSL to let go of the disk of $Name"
+    try {
+        for ($i = 0; $i -lt 180; $i++) {
+            if ($i -eq 15 -and @(Get-WinnowWslRunning | Where-Object { $_ -ne $Name }).Count -gt 0) { break }
+            if (Test-WinnowFileFree -Path $Disk) { return $null }
+            if ($i -ge 3) { Write-Progress -Activity $activity -SecondsRemaining (180 - $i) }
+            [System.Threading.Thread]::Sleep(1000)
+        }
+    } finally {
+        Write-Progress -Activity $activity -Completed
     }
     $others = @(Get-WinnowWslRunning | Where-Object { $_ -ne $Name })
     if ($others.Count -gt 0) {
@@ -618,7 +626,8 @@ function Test-WinnowFileFree {
 
 function Test-WinnowWslBoots {
     param([Parameter(Mandatory)][string]$Name)
-    $r = Invoke-WinnowProcess -Command 'wsl' -Arguments ('-d "{0}" --exec /bin/sh -c "exit 0"' -f $Name) -TimeoutSec 120
+    Assert-WinnowWslName -Name $Name
+    $r = Invoke-WinnowProcess -Command 'wsl' -Arguments ('-d {0} --exec /bin/sh -c "exit 0"' -f $Name) -TimeoutSec 120
     return ($r.ExitCode -eq 0)
 }
 
@@ -660,9 +669,20 @@ function Move-WinnowWslHome {
 
     $boots = Test-WinnowWslBoots -Name $m.Distro
     Stop-WinnowWslDistro -Name $m.Distro
-    $rec.Checked = "$($m.Distro) starts from $dest"
-    if (-not $boots) { $rec.Checked = "WSL moved $($m.Distro) to $dest, but it did not start; try wsl -d $($m.Distro)" }
     $rec.State = 'done'
+    $rec.Checked = "$($m.Distro) starts from $dest"
+    if (-not $boots) {
+        $back = Undo-WinnowWslHome -Record $rec
+        if ($back) {
+            $rec.State = 'done'
+            $rec.Checked = "WSL moved $($m.Distro) to $dest, but it did not start, and moving it back failed: $back"
+        } else {
+            $rec.State = 'failed'
+            $rec.Reason = "$($m.Distro) did not start from $dest, so Winnow moved it back"
+            Save-WinnowMoveRecord -Record $rec
+            return $rec
+        }
+    }
     $rec.FreedBytes = (Get-WinnowFreeSpace -Path $rec.From) - $freeBefore
     Save-WinnowMoveRecord -Record $rec
     return $rec
