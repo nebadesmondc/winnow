@@ -1231,9 +1231,14 @@ try {
         }
     }
 } finally {
-    foreach ($k in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedEnv[$k], 'Process') }
+    # NullString: PowerShell would pass $null as '', which PowerShell 7 stores instead of deleting.
+    $restore = { param($n, $v, $scope)
+        if ($v) { [Environment]::SetEnvironmentVariable($n, $v, $scope) }
+        else { [Environment]::SetEnvironmentVariable($n, [System.Management.Automation.Language.NullString]::Value, $scope) }
+    }
+    foreach ($k in $savedEnv.Keys) { & $restore $k $savedEnv[$k] 'Process' }
     if ($userVariables) {
-        foreach ($k in $savedUserEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedUserEnv[$k], 'User') }
+        foreach ($k in $savedUserEnv.Keys) { & $restore $k $savedUserEnv[$k] 'User' }
     }
     & $M { Reset-WinnowGuardPolicy; Import-WinnowRule -Refresh | Out-Null; $script:WinnowLastReport = $null; $script:WinnowVariableTarget = 'User' }
 }

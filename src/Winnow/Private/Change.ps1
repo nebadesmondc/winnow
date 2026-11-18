@@ -364,18 +364,23 @@ function Set-WinnowUserVariable {
     #>
     param(
         [Parameter(Mandatory)][string]$Name,
-        [AllowNull()][AllowEmptyString()][string]$Value,
+        [AllowNull()][AllowEmptyString()]$Value,
         # This session's value, when it differs (an undo restores both as they were).
-        [AllowNull()][AllowEmptyString()][string]$ProcessValue
+        [AllowNull()][AllowEmptyString()]$ProcessValue
     )
 
     $allowed = @(Import-WinnowRule | Where-Object { $_.Move } | ForEach-Object { $_.Move.Env })
     if ($allowed -notcontains $Name) { throw "Winnow: '$Name' is not a variable any rule moves." }
     if (-not $PSBoundParameters.ContainsKey('ProcessValue')) { $ProcessValue = $Value }
-    if ([string]::IsNullOrEmpty($Value)) { $Value = $null }
-    if ([string]::IsNullOrEmpty($ProcessValue)) { $ProcessValue = $null }
-    [System.Environment]::SetEnvironmentVariable($Name, $Value, $script:WinnowVariableTarget)
-    [System.Environment]::SetEnvironmentVariable($Name, $ProcessValue, 'Process')
+    foreach ($pair in @(@($script:WinnowVariableTarget, $Value), @('Process', $ProcessValue))) {
+        # PowerShell passes $null to a .NET string as ''; .NET Framework then
+        # deletes the variable, but .NET 5+ stores it empty. NullString is a real null.
+        if ([string]::IsNullOrEmpty([string]$pair[1])) {
+            [System.Environment]::SetEnvironmentVariable($Name, [System.Management.Automation.Language.NullString]::Value, $pair[0])
+        } else {
+            [System.Environment]::SetEnvironmentVariable($Name, [string]$pair[1], $pair[0])
+        }
+    }
 }
 
 function Stop-WinnowWslDistro {
