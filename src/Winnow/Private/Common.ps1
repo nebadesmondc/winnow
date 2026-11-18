@@ -13,6 +13,8 @@ $script:WinnowChildEnvironment = @{
     'UV_OFFLINE'                    = '1'       # uv
     'DO_NOT_TRACK'                  = '1'       # generic telemetry opt-out
     'DOTNET_CLI_TELEMETRY_OPTOUT'   = '1'
+    'DOTNET_NOLOGO'                 = '1'
+    'WSL_UTF8'                      = '1'       # wsl.exe prints UTF-16 otherwise
 }
 
 function ConvertTo-WinnowFullPath {
@@ -188,9 +190,30 @@ function Invoke-WinnowCli {
         [int]$TimeoutSec = 10
     )
 
+    $r = Invoke-WinnowProcess -Command $Command -Arguments $Arguments -TimeoutSec $TimeoutSec
+    if ($r.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($r.Output)) { return $null }
+    return $r.Output
+}
+
+function Invoke-WinnowProcess {
+    <#
+    .SYNOPSIS
+    Runs a command with a timeout, offline and from the profile folder.
+
+    .OUTPUTS
+    [pscustomobject] ExitCode (-1 when it could not start or timed out),
+    Output, Error (both trimmed), TimedOut
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [string]$Arguments = '',
+        [int]$TimeoutSec = 10
+    )
+
+    $result = [pscustomobject]@{ ExitCode = -1; Output = ''; Error = ''; TimedOut = $false }
     $exe = $null
-    try { $exe = Get-Command -Name $Command -ErrorAction Stop } catch { return $null }
-    if (-not $exe) { return $null }
+    try { $exe = Get-Command -Name $Command -CommandType Application -ErrorAction Stop | Select-Object -First 1 } catch { return $result }
+    if (-not $exe) { return $result }
 
     # npm and pnpm are .cmd shims and need cmd.exe.
     $file = 'cmd.exe'
@@ -219,18 +242,22 @@ function Invoke-WinnowCli {
     $proc = $null
     try {
         $proc = [System.Diagnostics.Process]::Start($psi)
+        # Both streams are drained, or a chatty tool blocks on a full pipe.
         $stdout = $proc.StandardOutput.ReadToEndAsync()
+        $stderr = $proc.StandardError.ReadToEndAsync()
         if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
             try { $proc.Kill() } catch { }
             Write-Verbose "Winnow: '$Command $Arguments' timed out after ${TimeoutSec}s."
-            return $null
+            $result.TimedOut = $true
+            return $result
         }
-        if ($proc.ExitCode -ne 0) { return $null }
-        $text = $stdout.Result
-        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
-        return $text.Trim()
+        $proc.WaitForExit()
+        $result.ExitCode = $proc.ExitCode
+        if ($stdout.Result) { $result.Output = $stdout.Result.Trim() }
+        if ($stderr.Result) { $result.Error = $stderr.Result.Trim() }
+        return $result
     } catch {
-        return $null
+        return $result
     } finally {
         if ($proc) { try { $proc.Dispose() } catch { } }
     }

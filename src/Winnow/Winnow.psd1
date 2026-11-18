@@ -5,7 +5,7 @@
     Author            = 'Winnow contributors'
     CompanyName       = 'Winnow contributors'
     Copyright         = '(c) Winnow contributors. MIT License.'
-    Description       = 'Shows where the space on your Windows system drive went and gets it back safely: a read-only map of the drive, a verdict and a cost for every large item, and guarded removal of only what you approve. Offline, no admin rights.'
+    Description       = 'Shows where the space on your Windows system drive went and gets it back safely: a read-only map of the drive, a verdict and a cost for every large item, guarded removal of only what you approve, and moves of caches and WSL distributions to another drive that undo reverses. Offline, no admin rights.'
 
     PowerShellVersion = '5.1'
 
@@ -14,6 +14,8 @@
         'Get-WinnowRule'
         'Invoke-Winnow'
         'Invoke-WinnowClean'
+        'Invoke-WinnowMove'
+        'Undo-WinnowMove'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

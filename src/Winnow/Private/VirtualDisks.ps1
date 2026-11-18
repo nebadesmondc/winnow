@@ -47,10 +47,6 @@ function Get-WinnowWslDiskCandidate {
                 Title    = "WSL $($d.Name)"
                 Id       = 'wsl-' + ($d.Name.ToLowerInvariant() -replace '[^a-z0-9.]+', '-')
                 Evidence = $evidence
-                Steps    = @(
-                    'wsl --shutdown'
-                    "wsl --manage $($d.Name) --move <folder on another drive>   (WSL 2.3 or later; wsl --version shows yours)"
-                )
             }
         }
     }

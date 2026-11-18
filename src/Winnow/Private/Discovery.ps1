@@ -37,18 +37,7 @@ function Resolve-WinnowRoot {
                     $out = Invoke-WinnowCli -Command $step.Command -Arguments $step.Args -TimeoutSec $timeout
                     $script:WinnowCliAnswers[$key] = $out
                 }
-                if ([string]::IsNullOrWhiteSpace($out)) { continue }
-                # Take the first line that looks like an absolute path.
-                foreach ($line in ($out -split "`r?`n")) {
-                    $t = $line.Trim().Trim('"')
-                    if ([string]::IsNullOrWhiteSpace($t)) { continue }
-                    if ($t -match '^[A-Za-z]:\\' -or $t -match '^[\\/]{2}' -or $t -match '^/') {
-                        $candidate = $t
-                        break
-                    }
-                    # Some CLIs print "global-packages: <path>".
-                    if ($t -match ':\s+([A-Za-z]:\\.+)$') { $candidate = $Matches[1]; break }
-                }
+                $candidate = Get-WinnowPathFromOutput -Text $out
                 $detail = "resolved via ``$($step.Command) $($step.Args)``"
             }
 
@@ -113,6 +102,21 @@ function Resolve-WinnowRoot {
         $found.Add($hit)
     }
     if ($All) { return $found }
+    return $null
+}
+
+function Get-WinnowPathFromOutput {
+    # The first line of a tool's answer that looks like an absolute path.
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    foreach ($line in ($Text -split "`r?`n")) {
+        $t = $line.Trim().Trim('"')
+        if ([string]::IsNullOrWhiteSpace($t)) { continue }
+        if ($t -match '^[A-Za-z]:\\' -or $t -match '^[\\/]{2}' -or $t -match '^/') { return $t }
+        # Some CLIs print "global-packages: <path>".
+        if ($t -match ':\s+([A-Za-z]:\\.+)$') { return $Matches[1] }
+    }
     return $null
 }
 

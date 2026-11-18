@@ -21,9 +21,11 @@
         Reclaim     = @(@{ Type = 'ReportOnly' })
         MinBytes    = 512MB
         Consequence = "Holds Docker Desktop's images, containers, volumes and build cache. Deleting it deletes them all."
+        # Docker Desktop moves its own disk; Winnow only gives the steps.
         Steps       = @(
+            'Docker Desktop > Settings > Resources > Advanced > Disk image location.'
+            'Browse to an empty folder on another drive, then Apply & restart. Docker copies the disk there and removes the old one.'
             'docker system df shows what is inside; docker system prune removes stopped containers, unused networks and images, and build cache.'
-            'To move it: Docker Desktop > Settings > Resources > Advanced > Disk image location.'
         )
         Docs        = 'https://docs.docker.com/desktop/settings-and-maintenance/settings/'
     }
