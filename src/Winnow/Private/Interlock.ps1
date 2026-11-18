@@ -127,6 +127,20 @@ function Get-WinnowUpdateInFlight {
         }
     }
 
+    # An installed VS Code update waits for a restart; its builds and the
+    # installer it downloaded to Temp stay until then.
+    foreach ($install in @(Get-WinnowVSCodeInstall)) {
+        if (-not $install.Pending) { continue }
+        $why = "$($install.Name) $($install.Pending.Version) is installed and waits for a restart"
+        $found.Add([pscustomobject]@{ Root = $install.Path; Evidence = $why })
+        $temp = Get-WinnowEnvRoot 'TEMP'
+        if ($temp) {
+            foreach ($t in (Get-WinnowChildDirectory -Path $temp)) {
+                if ($t.Name -like 'vscode-*') { $found.Add([pscustomobject]@{ Root = $t.Path; Evidence = $why }) }
+            }
+        }
+    }
+
     $seen = @{}
     $unique = New-Object System.Collections.Generic.List[object]
     foreach ($f in $found) {
@@ -136,6 +150,35 @@ function Get-WinnowUpdateInFlight {
         $unique.Add($f)
     }
     return $unique
+}
+
+function Get-WinnowHoldReason {
+    <#
+    .SYNOPSIS
+    Why a path must not be touched right now, or $null: its app is mid-update,
+    a program runs from inside it, or an app it needs closed is running.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowEmptyCollection()][string[]]$RequiresClosed = @(),
+        [object[]]$InFlight = @()
+    )
+
+    foreach ($f in $InFlight) {
+        if (Test-WinnowPathUnder -Path $Path -Root $f.Root) {
+            return "an update is in flight for this application ($($f.Evidence))"
+        }
+    }
+    $locks = @(Get-WinnowPathLock -Path $Path)
+    if ($locks.Count -gt 0) {
+        $names = ($locks | Select-Object -ExpandProperty Name -Unique) -join ', '
+        return "in use: $names runs from inside it; close it and scan again"
+    }
+    $running = @(Test-WinnowProcessRunning -Name $RequiresClosed)
+    if ($running.Count -gt 0) {
+        return "$($running -join ', ') must be closed first"
+    }
+    return $null
 }
 
 function Test-WinnowTreeLocked {
@@ -192,79 +235,69 @@ function Test-WinnowTreeLocked {
     return $false
 }
 
+# Files that never belong in a cache. Patterns are '*.ext', 'prefix*' or an
+# exact name; the walker matches them without wildcards in between.
+$script:WinnowSecretPatterns = @('*.pem', '*.ppk', '*.pfx', '*.p12', '*.kdbx', '*.keytab',
+    'id_rsa*', 'id_ed25519*', '.env', '.git-credentials', '.netrc')
+$script:WinnowVirtualDiskPatterns = @('*.vhdx', '*.vhd', '*.vmdk', '*.vdi', '*.qcow2')
+$script:WinnowDocumentPatterns = @('*.docx', '*.xlsx', '*.pptx', '*.pdf', '*.psd', '*.ai',
+    '*.sketch', '*.fig', '*.mp4', '*.mov', '*.mkv', '*.sql', '*.bak', '*.pst', '*.dwg')
+
 function Test-WinnowSentinel {
     <#
     .SYNOPSIS
-    Looks for content that does not belong in a cache. Key material blocks;
-    documents and media only lower confidence, as some caches hold a few.
+    Looks for content that does not belong in a cache. Keys and virtual disks
+    block removal; documents and media mean only the owner can judge it.
+
+    .PARAMETER Walk
+    A walk that covers Path. Without one, Path is walked here.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
-        [int]$DocumentThreshold = 3,
-        [int]$MaxFilesToScan = 4000
+        [object]$Walk,
+        [int]$DocumentThreshold = 3
     )
 
     $verdict = [pscustomobject]@{
-        Blocked        = $false
-        NeedsConfirm   = $false
-        Reason         = $null
-        Samples        = (New-Object System.Collections.Generic.List[string])
+        Blocked      = $false
+        NeedsConfirm = $false
+        Reason       = $null
+        Samples      = @()
     }
 
     $canon = ConvertTo-WinnowFullPath $Path
     if (-not $canon) { return $verdict }
-    $lp = ConvertTo-WinnowLongPath $canon
-    if (-not [System.IO.Directory]::Exists($lp)) { return $verdict }
 
-    $secretPatterns = @('*.pem', '*.ppk', '*.pfx', '*.p12', '*.kdbx', '*.keytab',
-                        'id_rsa*', 'id_ed25519*', '.env', '.git-credentials', '.netrc')
-    $docPatterns    = @('*.docx', '*.xlsx', '*.pptx', '*.pdf', '*.psd', '*.ai',
-                        '*.sketch', '*.fig', '*.mp4', '*.mov', '*.mkv', '*.sql',
-                        '*.bak', '*.pst', '*.dwg')
+    $entry = $null
+    if ($Walk) { $entry = $Walk.Find($canon) }
+    if (-not $entry) {
+        $Walk = [Winnow.SpaceWalker]::Walk((New-WinnowWalkOptions -Root $canon))
+        if ($Walk.Folders.Count -gt 0) { $entry = $Walk.Folders[0] }
+    }
+    if (-not $entry) { return $verdict }
 
-    $docHits = 0
-    $scanned = 0
-    $stack = New-Object System.Collections.Generic.Stack[string]
-    $stack.Push($lp)
-
-    while ($stack.Count -gt 0 -and $scanned -lt $MaxFilesToScan) {
-        $dir = $stack.Pop()
-        $di = $null
-        try { $di = New-Object System.IO.DirectoryInfo($dir) } catch { continue }
-        $entries = $null
-        try { $entries = $di.GetFileSystemInfos() } catch { continue }
-
-        foreach ($e in $entries) {
-            if (($e.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
-            if (($e.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
-                $stack.Push($e.FullName); continue
+    if ($entry.BlockedFiles -gt 0) {
+        $listed = @($Walk.BlockedUnder($canon))
+        # Certificate bundles (certifi's cacert.pem) are public.
+        $real = @($listed | Where-Object { -not ($_ -like '*.pem' -and -not (Test-WinnowPemPrivateKey -Path $_)) })
+        # The walk lists a bounded number of paths; any it did not list count.
+        if ($real.Count -gt 0 -or $listed.Count -lt $entry.BlockedFiles) {
+            $names = @($real | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Select-Object -Unique -First 3)
+            $isDisk = $false
+            foreach ($n in $names) {
+                foreach ($vp in $script:WinnowVirtualDiskPatterns) { if ($n -like $vp) { $isDisk = $true } }
             }
-            $scanned++
-            if ($scanned -ge $MaxFilesToScan) { break }
-
-            foreach ($sp in $secretPatterns) {
-                if ($e.Name -like $sp) {
-                    # Certificate bundles (certifi's cacert.pem) are public.
-                    if ($sp -eq '*.pem' -and -not (Test-WinnowPemPrivateKey -Path $e.FullName)) { continue }
-                    $verdict.Blocked = $true
-                    $verdict.Reason = "contains credential or key material matching '$sp'"
-                    if ($verdict.Samples.Count -lt 5) { $verdict.Samples.Add($e.Name) }
-                    return $verdict
-                }
-            }
-            foreach ($dp in $docPatterns) {
-                if ($e.Name -like $dp) {
-                    $docHits++
-                    if ($verdict.Samples.Count -lt 5) { $verdict.Samples.Add($e.Name) }
-                    break
-                }
-            }
+            $verdict.Blocked = $true
+            $verdict.Samples = $names
+            if ($isDisk) { $verdict.Reason = 'holds a virtual disk' }
+            else { $verdict.Reason = 'holds key or credential files' }
+            return $verdict
         }
     }
 
-    if ($docHits -ge $DocumentThreshold) {
+    if ($entry.DocumentFiles -ge $DocumentThreshold) {
         $verdict.NeedsConfirm = $true
-        $verdict.Reason = "contains $docHits document/media file(s) unusual for a cache"
+        $verdict.Reason = "holds $($entry.DocumentFiles) document or media files, unusual for a cache"
     }
     return $verdict
 }

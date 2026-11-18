@@ -5,8 +5,7 @@
     @{
         Id       = 'cache.uv'
         Title    = 'uv package cache'
-        Category = 'PackageCache'
-        Tier     = 'Rebuildable'
+        Verdict  = 'Clean'
         Resolve  = @(
             @{ Type = 'Cli'; Command = 'uv'; Args = 'cache dir'; TimeoutSec = 10 }
             @{ Type = 'Env'; Name = 'UV_CACHE_DIR' }
@@ -25,8 +24,7 @@
     @{
         Id       = 'cache.npm'
         Title    = 'npm package cache'
-        Category = 'PackageCache'
-        Tier     = 'Rebuildable'
+        Verdict  = 'Clean'
         Resolve  = @(
             @{ Type = 'Cli'; Command = 'npm'; Args = 'config get cache'; TimeoutSec = 20; Sub = '_cacache' }
             @{ Type = 'Env'; Name = 'NPM_CONFIG_CACHE'; Sub = '_cacache' }
@@ -44,8 +42,7 @@
     @{
         Id       = 'cache.pnpm'
         Title    = 'pnpm content-addressable store'
-        Category = 'PackageCache'
-        Tier     = 'Rebuildable'
+        Verdict  = 'Clean'
         # The store, not pnpm-cache (metadata).
         Resolve  = @(
             @{ Type = 'Cli'; Command = 'pnpm'; Args = 'store path'; TimeoutSec = 20 }
@@ -64,8 +61,7 @@
     @{
         Id       = 'cache.pip'
         Title    = 'pip wheel cache'
-        Category = 'PackageCache'
-        Tier     = 'Rebuildable'
+        Verdict  = 'Clean'
         Resolve  = @(
             @{ Type = 'Cli'; Command = 'pip'; Args = 'cache dir'; TimeoutSec = 20 }
             @{ Type = 'Env'; Name = 'PIP_CACHE_DIR' }
@@ -84,8 +80,7 @@
     @{
         Id       = 'cache.gradle.caches'
         Title    = 'Gradle dependency cache'
-        Category = 'PackageCache'
-        Tier     = 'Rebuildable'
+        Verdict  = 'Clean'
         Resolve  = @(
             @{ Type = 'Env'; Name = 'GRADLE_USER_HOME'; Sub = 'caches' }
             @{ Type = 'Path'; Base = 'USERPROFILE'; Sub = '.gradle\caches' }
@@ -98,8 +93,7 @@
     @{
         Id       = 'cache.gradle.daemon'
         Title    = 'Gradle daemon logs'
-        Category = 'AppCache'
-        Tier     = 'Transient'
+        Verdict  = 'Clean'
         Resolve  = @(
             @{ Type = 'Env'; Name = 'GRADLE_USER_HOME'; Sub = 'daemon' }
             @{ Type = 'Path'; Base = 'USERPROFILE'; Sub = '.gradle\daemon' }
@@ -112,8 +106,7 @@
     @{
         Id       = 'cache.npx'
         Title    = 'npx one-off package cache'
-        Category = 'PackageCache'
-        Tier     = 'Rebuildable'
+        Verdict  = 'Clean'
         Resolve  = @(
             @{ Type = 'Cli'; Command = 'npm'; Args = 'config get cache'; TimeoutSec = 20; Sub = '_npx' }
             @{ Type = 'Env'; Name = 'NPM_CONFIG_CACHE'; Sub = '_npx' }
@@ -126,8 +119,7 @@
     @{
         Id       = 'cache.playwright'
         Title    = 'Playwright browser binaries'
-        Category = 'PackageCache'
-        Tier     = 'Rebuildable'
+        Verdict  = 'Clean'
         Resolve  = @(
             @{ Type = 'Env'; Name = 'PLAYWRIGHT_BROWSERS_PATH' }
             @{ Type = 'Path'; Base = 'LOCALAPPDATA'; Sub = 'ms-playwright' }
@@ -141,8 +133,7 @@
     @{
         Id       = 'cache.pub'
         Title    = 'Dart/Flutter pub cache'
-        Category = 'PackageCache'
-        Tier     = 'Rebuildable'
+        Verdict  = 'Clean'
         Resolve  = @(
             @{ Type = 'Env'; Name = 'PUB_CACHE' }
             @{ Type = 'Path'; Base = 'LOCALAPPDATA'; Sub = 'Pub\Cache' }
@@ -156,8 +147,7 @@
     @{
         Id       = 'temp.user'
         Title    = 'User temporary files'
-        Category = 'AppCache'
-        Tier     = 'Transient'
+        Verdict  = 'Clean'
         Resolve  = @(
             @{ Type = 'Path'; Base = 'TEMP' }
         )

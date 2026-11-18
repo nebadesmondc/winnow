@@ -1,51 +1,23 @@
 function Get-WinnowReport {
     <#
     .SYNOPSIS
-    Scans for reclaimable disk space. Changes nothing.
+    Scans the system drive and returns the report object. Changes nothing.
 
     .DESCRIPTION
-    Runs every enabled rule and renders a report grouped by tier. Read-only.
+    For scripts; people use winnow. The report holds every finding with its
+    verdict, size, evidence and what removing it costs.
 
     .PARAMETER RuleId
     Restrict the scan to specific rules. See Get-WinnowRule for the list.
 
-    .PARAMETER All
-    List every finding rather than the largest few per tier.
-
-    .PARAMETER AsObject
-    Return the report object instead of rendering it, for scripting.
-
-    .PARAMETER Json
-    Return the report as JSON (schema winnow/report/1), for tools and agents.
+    .EXAMPLE
+    $r = Get-WinnowReport; $r.Findings | Where-Object Verdict -eq 'Clean'
 
     .EXAMPLE
-    Get-WinnowReport
-
-    .EXAMPLE
-    Get-WinnowReport -RuleId cache.uv,cache.gradle.caches -All
-
-    .EXAMPLE
-    $r = Get-WinnowReport -AsObject; $r.Findings | Where-Object Bytes -gt 1GB
+    Get-WinnowReport | ConvertTo-Json -Depth 6
     #>
     [CmdletBinding()]
-    param(
-        [string[]]$RuleId,
-        [switch]$All,
-        [switch]$AsObject,
-        [switch]$Json,
-        [int]$Top = 8
-    )
+    param([string[]]$RuleId)
 
-    $report = Invoke-WinnowScan -RuleId $RuleId
-
-    if ($Json) {
-        return ($report | ConvertTo-Json -Depth 6)
-    }
-    if ($AsObject) {
-        return $report
-    }
-
-    Show-WinnowReport -Report $report -Top $Top -All:$All
-    Write-WinnowLine '  Next: Start-Winnow  (guided)   or   Invoke-WinnowClean -WhatIf' -Style Dim
-    Write-Host ''
+    return (Invoke-WinnowScan -RuleId $RuleId -NoProgress)
 }

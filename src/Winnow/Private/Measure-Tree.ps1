@@ -1,107 +1,62 @@
-# Directory measurement. Not Get-ChildItem -Recurse, which follows junctions,
-# fails on long paths and stops at the first access-denied.
+# Measurement, backed by the native walker in SpaceWalker.cs.
+
+function New-WinnowWalkOptions {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [int]$Threads = 4,
+        [int]$KeepDepth = 0,
+        [double]$KeepMinBytes = 1MB
+    )
+
+    $o = New-Object Winnow.WalkOptions
+    $o.Root = $Root
+    $o.Threads = $Threads
+    $o.KeepDepth = $KeepDepth
+    $o.KeepMinBytes = [long]$KeepMinBytes
+    $o.BlockPatterns = [string[]]@($script:WinnowSecretPatterns + $script:WinnowVirtualDiskPatterns)
+    $o.DocumentPatterns = [string[]]$script:WinnowDocumentPatterns
+    $o.NotablePatterns = [string[]]$script:WinnowVirtualDiskPatterns
+
+    $o.DedupeHardLinks = $false
+    try {
+        $drive = New-Object System.IO.DriveInfo([System.IO.Path]::GetPathRoot($Root))
+        $o.DedupeHardLinks = ($drive.DriveFormat -eq 'NTFS')
+    } catch { }
+    return $o
+}
 
 function Measure-WinnowTree {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [int]$MaxDepth = 64,
-        [switch]$Histogram,
-        [int]$TimeoutSec = 0
-    )
+    <#
+    .SYNOPSIS
+    Size of a file or folder tree on disk. Hard-linked files count once; links
+    are not followed.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
 
     $result = [pscustomobject]@{
         Path         = $Path
+        Exists       = $false
         Bytes        = [double]0
         Files        = 0
-        Dirs         = 0
         NewestWrite  = $null
-        OldestWrite  = $null
         DeniedCount  = 0
         SkippedLinks = 0
-        TimedOut     = $false
-        Extensions   = @{}
-        Exists       = $false
     }
 
     $canon = ConvertTo-WinnowFullPath $Path
     if (-not $canon) { return $result }
     $result.Path = $canon
 
-    $lp = ConvertTo-WinnowLongPath $canon
+    $walk = [Winnow.SpaceWalker]::Walk((New-WinnowWalkOptions -Root $canon))
+    if (-not $walk.Exists -or $walk.Folders.Count -eq 0) { return $result }
 
-    if ([System.IO.File]::Exists($lp)) {
-        try {
-            $fi = New-Object System.IO.FileInfo($lp)
-            $result.Exists = $true
-            $result.Bytes = [double]$fi.Length
-            $result.Files = 1
-            $result.NewestWrite = $fi.LastWriteTimeUtc
-            $result.OldestWrite = $fi.LastWriteTimeUtc
-            if ($Histogram) { $result.Extensions[$fi.Extension.ToLower()] = 1 }
-        } catch { }
-        return $result
-    }
-
-    if (-not [System.IO.Directory]::Exists($lp)) { return $result }
+    $top = $walk.Folders[0]
     $result.Exists = $true
-
-    $deadline = $null
-    if ($TimeoutSec -gt 0) { $deadline = (Get-Date).AddSeconds($TimeoutSec) }
-
-    $newest = [datetime]::MinValue
-    $oldest = [datetime]::MaxValue
-    $ext = @{}
-
-    # Stack of (longPath, depth)
-    $stack = New-Object System.Collections.Generic.Stack[object]
-    $stack.Push(@($lp, 0))
-
-    while ($stack.Count -gt 0) {
-        if ($deadline -and (Get-Date) -gt $deadline) { $result.TimedOut = $true; break }
-
-        $frame = $stack.Pop()
-        $dir = $frame[0]
-        $depth = [int]$frame[1]
-
-        $di = $null
-        try { $di = New-Object System.IO.DirectoryInfo($dir) } catch { $result.DeniedCount++; continue }
-
-        $entries = $null
-        try { $entries = $di.GetFileSystemInfos() } catch { $result.DeniedCount++; continue }
-
-        foreach ($e in $entries) {
-            try {
-                $isLink = (($e.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
-                if ($isLink) { $result.SkippedLinks++; continue }
-
-                if (($e.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
-                    $result.Dirs++
-                    if ($depth -lt $MaxDepth) { $stack.Push(@($e.FullName, $depth + 1)) }
-                    continue
-                }
-
-                $result.Files++
-                $result.Bytes += [double]$e.Length
-                $w = $e.LastWriteTimeUtc
-                if ($w -gt $newest) { $newest = $w }
-                if ($w -lt $oldest) { $oldest = $w }
-
-                if ($Histogram) {
-                    $x = $e.Extension
-                    if ([string]::IsNullOrEmpty($x)) { $x = '(none)' } else { $x = $x.ToLower() }
-                    if ($ext.ContainsKey($x)) { $ext[$x] = $ext[$x] + 1 } else { $ext[$x] = 1 }
-                }
-            } catch {
-                $result.DeniedCount++
-            }
-        }
-    }
-
-    if ($newest -ne [datetime]::MinValue) { $result.NewestWrite = $newest }
-    if ($oldest -ne [datetime]::MaxValue) { $result.OldestWrite = $oldest }
-    if ($Histogram) { $result.Extensions = $ext }
-
+    $result.Bytes = [double]$top.Bytes
+    $result.Files = $top.Files
+    if ($top.NewestWriteUtc -gt [datetime]::MinValue) { $result.NewestWrite = $top.NewestWriteUtc }
+    $result.DeniedCount = $walk.Denied.Count
+    $result.SkippedLinks = $walk.LinksSkipped
     return $result
 }
 

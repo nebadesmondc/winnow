@@ -1,16 +1,31 @@
 name: CI
 
 on:
-  push:
   pull_request:
+    paths-ignore: ['**.md']
+  push:
+    branches: [master]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+    inputs:
+      full_scan:
+        description: Also scan the runner's whole system drive (about 10 minutes)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+# A newer push to a pull request cancels its older run; every master commit runs to the end.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     name: Tests (${{ matrix.name }})
     runs-on: windows-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -19,6 +34,9 @@ jobs:
             exe: powershell
           - name: PowerShell 7
             exe: pwsh
+    env:
+      # The whole-drive scan is slow on a cold runner; one job runs it, on request.
+      WINNOW_FULL_SCAN: ${{ inputs.full_scan && matrix.exe == 'pwsh' && '1' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run the test suite
@@ -27,7 +45,8 @@ jobs:
 
   lint:
     name: PSScriptAnalyzer
-    runs-on: windows-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Analyze

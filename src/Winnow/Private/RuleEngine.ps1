@@ -1,9 +1,6 @@
 # Rule loading and the scan pipeline.
 
 $script:WinnowRuleDefaults = @{
-    Category            = 'AppCache'
-    Tier                = 'Rebuildable'
-    Contexts            = @('LocalFs')
     Resolve             = @()
     Discover            = $null
     Target              = 'Root'
@@ -13,9 +10,9 @@ $script:WinnowRuleDefaults = @{
     MinBytes            = 25MB
     MinAgeDays          = 0
     RequiresClosed      = @()
-    RequiresAdmin       = $false
     ExpectsDocuments    = $false
     AllowsInsideProject = @()
+    Steps               = @()
     Docs                = $null
     Enabled             = $true
 }
@@ -24,7 +21,7 @@ function Import-WinnowRule {
     <#
     .SYNOPSIS
     Loads Rules\*.rules.ps1, applies defaults and skips invalid rules,
-    including any without a Consequence.
+    including any without a Verdict or a Consequence.
     #>
     [CmdletBinding()]
     param([string]$RulePath, [switch]$Refresh)
@@ -58,6 +55,10 @@ function Import-WinnowRule {
                 Write-Warning "Winnow: rule '$($r.Id)' has no Consequence and was skipped (see CONTRIBUTING.md)."
                 continue
             }
+            if (-not $r.ContainsKey('Verdict') -or -not $script:WinnowVerdictNames.Contains([string]$r.Verdict)) {
+                Write-Warning "Winnow: rule '$($r.Id)' has no valid Verdict and was skipped (see CONTRIBUTING.md)."
+                continue
+            }
             if ($seen.ContainsKey($r.Id)) {
                 Write-Warning "Winnow: duplicate rule id '$($r.Id)' in '$($pack.Name)' was skipped."
                 continue
@@ -66,10 +67,6 @@ function Import-WinnowRule {
 
             foreach ($k in $script:WinnowRuleDefaults.Keys) {
                 if (-not $r.ContainsKey($k)) { $r[$k] = $script:WinnowRuleDefaults[$k] }
-            }
-            if (-not $script:WinnowTierOrder.ContainsKey($r.Tier)) {
-                Write-Warning "Winnow: rule '$($r.Id)' has unknown Tier '$($r.Tier)' and was skipped."
-                continue
             }
 
             $seen[$r.Id] = $true
@@ -84,12 +81,15 @@ function Import-WinnowRule {
 function Invoke-WinnowScan {
     <#
     .SYNOPSIS
-    Runs every enabled rule and returns a report object. Changes nothing.
+    Walks the system drive, runs every enabled rule and returns a report
+    object with the findings and the space map. Changes nothing.
     #>
     [CmdletBinding()]
     param(
         [string[]]$RuleId,
-        [switch]$NoProgress
+        [switch]$NoProgress,
+        # A folder in place of the system drive; the tests scan a fake one.
+        [string]$Root
     )
 
     Reset-WinnowProcessMap
@@ -97,6 +97,9 @@ function Invoke-WinnowScan {
 
     $runId = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4)
     $started = Get-Date
+    $driveRoot = Get-WinnowSystemDriveRoot
+    if ($Root) { $driveRoot = ConvertTo-WinnowFullPath $Root }
+    $walking = Start-WinnowDriveWalk -Root $driveRoot
 
     $rules = @(Import-WinnowRule)
     if ($RuleId) { $rules = @($rules | Where-Object { $RuleId -contains $_.Id }) }
@@ -107,23 +110,47 @@ function Invoke-WinnowScan {
     $rules = @(@($rules | Where-Object { -not $_.Discover }) + @($rules | Where-Object { $_.Discover }))
     $claimed = New-Object System.Collections.Generic.List[string]
 
+    $findings = New-Object System.Collections.Generic.List[object]
+    $ruleErrors = New-Object System.Collections.Generic.List[object]
+
+    # Tools are asked for their paths while the drive is walked.
+    $resolved = @{}
+    foreach ($rule in $rules) {
+        if ($rule.Discover) { continue }
+        if (-not $NoProgress) { Write-Progress -Activity 'Winnow' -Status "Asking tools: $($rule.Title)" }
+        try { $resolved[$rule.Id] = @(Get-WinnowRuleCandidate -Rule $rule) }
+        catch { $ruleErrors.Add([pscustomobject]@{ RuleId = $rule.Id; Message = $_.Exception.Message }) }
+    }
+
     # Apps mid-update are held back for the whole run.
     $inFlight = @(Get-WinnowUpdateInFlight)
 
-    $findings = New-Object System.Collections.Generic.List[object]
-    $ruleErrors = New-Object System.Collections.Generic.List[object]
-    $i = 0
+    while (-not $walking.Task.Wait(250)) {
+        if (-not $NoProgress) {
+            Write-Progress -Activity 'Winnow' -Status ('Measuring {0}: {1:N0} folders ({2:0} s)' -f `
+                $driveRoot, $walking.Progress.Folders, ((Get-Date) - $started).TotalSeconds)
+        }
+    }
+    $walk = $walking.Task.Result
+    $script:WinnowWalk = $walk
 
     foreach ($rule in $rules) {
-        $i++
-        if (-not $NoProgress) {
-            Write-Progress -Activity 'Winnow scan' -Status "$($rule.Title)" `
-                -PercentComplete ([int](100 * $i / [math]::Max($rules.Count, 1)))
-        }
-
+        if (-not $NoProgress) { Write-Progress -Activity 'Winnow' -Status $rule.Title }
         $candidates = @()
         try {
-            $candidates = @(Select-WinnowUnclaimedCandidate -Candidate @(Get-WinnowRuleCandidate -Rule $rule) -Claimed $claimed)
+            if ($rule.Discover) { $raw = @(Get-WinnowRuleCandidate -Rule $rule) }
+            elseif ($resolved.ContainsKey($rule.Id)) { $raw = $resolved[$rule.Id] }
+            else { continue }
+            # Only the system drive is mapped; a cache moved elsewhere is not an item.
+            # Folders the walk measured below the rule's minimum are dropped early.
+            $raw = @($raw | Where-Object {
+                $p = $null
+                if ($_.Path) { $p = ConvertTo-WinnowFullPath $_.Path }
+                if (-not $p -or -not (Test-WinnowPathUnder -Path $p -Root $driveRoot)) { return $false }
+                $e = $walk.Find($p)
+                (-not $e) -or ($e.Bytes -ge $rule.MinBytes)
+            })
+            $candidates = @(Select-WinnowUnclaimedCandidate -Candidate $raw -Claimed $claimed)
         } catch {
             $ruleErrors.Add([pscustomobject]@{ RuleId = $rule.Id; Message = $_.Exception.Message })
             continue
@@ -132,19 +159,17 @@ function Invoke-WinnowScan {
 
         foreach ($c in $candidates) {
             try {
-                $f = ConvertTo-WinnowFinding -Rule $rule -Candidate $c -RunId $runId -InFlight $inFlight
+                $f = ConvertTo-WinnowFinding -Rule $rule -Candidate $c -InFlight $inFlight -Walk $walk
                 if ($f) { $findings.Add($f) }
             } catch {
                 $ruleErrors.Add([pscustomobject]@{ RuleId = $rule.Id; Message = $_.Exception.Message })
             }
         }
     }
-    if (-not $NoProgress) { Write-Progress -Activity 'Winnow scan' -Completed }
+    if (-not $NoProgress) { Write-Progress -Activity 'Winnow' -Completed }
 
-    $volumes = @(Get-WinnowVolumeInfo)
-
-    return [pscustomobject]@{
-        Schema      = 'winnow/report/1'
+    $report = [pscustomobject]@{
+        Schema      = 'winnow/report/2'
         RunId       = $runId
         StartedUtc  = $started.ToUniversalTime()
         DurationSec = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
@@ -153,12 +178,23 @@ function Invoke-WinnowScan {
             PSVersion = $PSVersionTable.PSVersion.ToString()
             Elevated  = Test-WinnowElevated
         }
-        Volumes     = $volumes
+        Drive       = $driveRoot
+        Volumes     = @(Get-WinnowVolumeInfo)
         Findings    = $findings
+        Map         = (Get-WinnowSpaceMap -Walk $walk -Findings $findings -DriveRoot $driveRoot)
+        Walk        = [pscustomobject]@{
+            Seconds      = [math]::Round($walk.Seconds, 1)
+            Files        = $walk.Files
+            Folders      = $walk.FolderCount
+            Unreadable   = $walk.Denied.Count
+            LinksSkipped = $walk.LinksSkipped
+        }
         InFlight    = $inFlight
         RuleErrors  = $ruleErrors
         RuleCount   = $rules.Count
     }
+    $script:WinnowLastReport = $report
+    return $report
 }
 
 function Select-WinnowUnclaimedCandidate {
@@ -204,9 +240,9 @@ function Get-WinnowRuleCandidate {
         foreach ($d in @(& $Rule.Discover)) {
             if ($null -eq $d) { continue }
             if ($d -is [string]) {
-                $out.Add([pscustomobject]@{ Path = $d; Strategy = 'Discover'; Detail = 'located by detector'; Extra = $null })
+                $out.Add([pscustomobject]@{ Path = $d; Strategy = 'Discover'; Detail = $null; Extra = $null })
             } else {
-                $detail = 'located by detector'
+                $detail = $null
                 if ($d.PSObject.Properties['Detail'] -and $d.Detail) { $detail = $d.Detail }
                 $extra = $null
                 if ($d.PSObject.Properties['Extra']) { $extra = $d.Extra }
@@ -256,120 +292,40 @@ function Get-WinnowRuleCandidate {
     return $out
 }
 
+function Get-WinnowExtra {
+    # A detector's optional per-candidate value, or $null.
+    param($Candidate, [string]$Name)
+    if ($Candidate.Extra -and $Candidate.Extra.PSObject.Properties[$Name]) { return $Candidate.Extra.$Name }
+    return $null
+}
+
 function ConvertTo-WinnowFinding {
     <#
     .SYNOPSIS
-    Measures, guards, interlocks and scores one candidate. Returns $null when
-    the candidate does not qualify.
+    Measures one candidate and, when it could be removed, guards it, checks
+    for live use and scans it for keys. Returns $null when the candidate does
+    not qualify.
     #>
     param(
         [Parameter(Mandatory)][object]$Rule,
         [Parameter(Mandatory)][object]$Candidate,
-        [Parameter(Mandatory)][string]$RunId,
-        [object[]]$InFlight = @()
+        [object[]]$InFlight = @(),
+        [object]$Walk
     )
 
     $path = ConvertTo-WinnowFullPath $Candidate.Path
     if (-not $path) { return $null }
-    if (-not (Test-WinnowPathExists -Path $path)) { return $null }
 
-    $evidence = New-Object System.Collections.Generic.List[string]
-    $warnings = New-Object System.Collections.Generic.List[string]
-    if ($Candidate.Detail) { $evidence.Add($Candidate.Detail) }
-
-    # A rule producing a refused path is a bug; logged with -Verbose.
-    $verdict = Test-WinnowGuard -Path $path -AllowsInsideProject @($Rule.AllowsInsideProject)
-    if (-not $verdict.Allowed) {
-        Write-Verbose "Winnow: rule '$($Rule.Id)' produced a guard-refused path: $($verdict.Reason)"
-        return $null
-    }
-
-    $m = Measure-WinnowTree -Path $path
-    if (-not $m.Exists) { return $null }
-    if ($m.Bytes -lt $Rule.MinBytes) { return $null }
-
-    if ($Rule.MinAgeDays -gt 0 -and $m.NewestWrite) {
-        $ageDays = ((Get-Date).ToUniversalTime() - $m.NewestWrite).TotalDays
-        if ($ageDays -lt $Rule.MinAgeDays) { return $null }
-        $evidence.Add(('newest file is {0:N0} days old' -f $ageDays))
-    }
-    $evidence.Add(('{0:N0} file(s)' -f $m.Files))
-    if ($m.SkippedLinks -gt 0) { $evidence.Add("$($m.SkippedLinks) junction/symlink(s) not followed") }
-    if ($m.DeniedCount -gt 0) { $warnings.Add("$($m.DeniedCount) unreadable subdirector(y/ies) - size is a lower bound") }
-
-    # A program running from the path holds it back.
-    $liveNames = $null
-    $locks = @(Get-WinnowPathLock -Path $path)
-    if ($locks.Count -gt 0) {
-        $liveNames = ($locks | Select-Object -ExpandProperty Name -Unique) -join ', '
-    }
-
-    $blockedBy = @(Test-WinnowProcessRunning -Name @($Rule.RequiresClosed))
-    if ($blockedBy.Count -gt 0) {
-        $warnings.Add("requires these to be closed first: $($blockedBy -join ', ')")
-    }
-
-    # Open files only make the clean partial; warn, do not hold back.
-    if (Test-WinnowTreeLocked -Path $path) {
-        $warnings.Add('the owning application is running; close it for a complete reclaim')
-    }
-
-    $suppressed = $false
-    $suppressReason = $null
-    foreach ($f in $InFlight) {
-        if (Test-WinnowPathUnder -Path $path -Root $f.Root) {
-            $suppressed = $true
-            $suppressReason = "an update is in flight for this application ($($f.Evidence))"
-            break
+    $toolMissing = $null
+    foreach ($step in @($Rule.Reclaim)) {
+        if ($step.Type -eq 'VendorCli' -and -not (Get-Command -Name $step.Command -ErrorAction SilentlyContinue)) {
+            $toolMissing = $step.Command
         }
-    }
-    if (-not $suppressed -and $liveNames) {
-        $suppressed = $true
-        $suppressReason = "in use: $liveNames runs from inside it; close it and scan again"
-    }
-
-    # Key material holds the path back for good. ExpectsDocuments relaxes only
-    # the documents check.
-    $sentinelDocs = $false
-    $s = Test-WinnowSentinel -Path $path
-    if ($s.Blocked) {
-        $suppressed = $true
-        $suppressReason = 'never removed: it ' + $s.Reason + ' (' + (($s.Samples | Select-Object -First 3) -join ', ') + ')'
-    }
-    if ($s.NeedsConfirm -and -not $Rule.ExpectsDocuments) {
-        $sentinelDocs = $true
-        $warnings.Add($s.Reason + ' (e.g. ' + (($s.Samples | Select-Object -First 3) -join ', ') + ')')
-    }
-
-    $toolMissing = $false
-    if ($Rule.Reclaim) {
-        foreach ($step in @($Rule.Reclaim)) {
-            if ($step.Type -eq 'VendorCli' -and -not (Get-Command -Name $step.Command -ErrorAction SilentlyContinue)) {
-                $toolMissing = $true
-            }
-        }
-    }
-
-    $confArgs = @{
-        ResolveStrategy = $Candidate.Strategy
-        ToolMissing     = $toolMissing
-    }
-    if ($m.NewestWrite) { $confArgs['NewestWrite'] = $m.NewestWrite }
-    if ($sentinelDocs) { $confArgs['SentinelDocuments'] = $true }
-    if ($Candidate.Extra -and $Candidate.Extra.PSObject.Properties['InstallNegatives']) {
-        $confArgs['InstallNegatives'] = [int]$Candidate.Extra.InstallNegatives
-    }
-    $conf = Get-WinnowConfidence @confArgs
-    foreach ($n in $conf.Notes) { $evidence.Add($n) }
-
-    if ($Candidate.Extra -and $Candidate.Extra.PSObject.Properties['Evidence']) {
-        foreach ($e in @($Candidate.Extra.Evidence)) { if ($e) { $evidence.Add($e) } }
     }
 
     # The vendor command cleans the active cache, so old-location copies are
     # always deleted directly.
     $isLeftBehind = ($Candidate.PSObject.Properties['Primary'] -and -not $Candidate.Primary)
-
     $action = 'Delete'
     foreach ($step in @($Rule.Reclaim)) {
         if ($step.Type -eq 'VendorCli' -and -not $toolMissing -and -not $isLeftBehind) { $action = 'VendorCli'; break }
@@ -377,28 +333,93 @@ function ConvertTo-WinnowFinding {
         if ($step.Type -eq 'ReportOnly') { $action = 'ReportOnly'; break }
     }
 
+    $verdict = $Rule.Verdict
+    $removable = Test-WinnowFindingRemovable -Verdict $verdict -Action $action
+
+    $entry = $null
+    if ($Walk) { $entry = $Walk.Find($path) }
+    if (-not $entry) {
+        $m = Measure-WinnowTree -Path $path
+        if (-not $m.Exists) { return $null }
+        $entry = [pscustomobject]@{
+            Bytes = $m.Bytes; FreeableBytes = $m.Bytes; Files = $m.Files
+            NewestWriteUtc = $m.NewestWrite; Denied = $m.DeniedCount
+        }
+    }
+    if ($entry.Bytes -lt $Rule.MinBytes) { return $null }
+
+    # A rule producing a refused path is a bug; logged with -Verbose.
+    if ($removable) {
+        $g = Test-WinnowGuard -Path $path -AllowsInsideProject @($Rule.AllowsInsideProject)
+        if (-not $g.Allowed) {
+            Write-Verbose "Winnow: rule '$($Rule.Id)' produced a guard-refused path: $($g.Reason)"
+            return $null
+        }
+    }
+
+    $evidence = New-Object System.Collections.Generic.List[string]
+    $warnings = New-Object System.Collections.Generic.List[string]
+    if ($Candidate.Detail) { $evidence.Add($Candidate.Detail) }
+
     $newest = $null
-    if ($m.NewestWrite) { $newest = $m.NewestWrite }
+    if ($entry.NewestWriteUtc -and $entry.NewestWriteUtc -gt [datetime]::MinValue) { $newest = $entry.NewestWriteUtc }
+    if ($Rule.MinAgeDays -gt 0 -and $newest) {
+        $ageDays = ((Get-Date).ToUniversalTime() - $newest).TotalDays
+        if ($ageDays -lt $Rule.MinAgeDays) { return $null }
+        $evidence.Add(('newest file is {0:N0} days old' -f $ageDays))
+    }
+    if ($entry.Files -gt 1) { $evidence.Add(('{0:N0} files' -f $entry.Files)) }
+    if ($entry.FreeableBytes -lt $entry.Bytes * 0.9) {
+        $evidence.Add(('some files here are hard-linked from elsewhere; removing it frees about {0}' -f (Format-WinnowBytes $entry.FreeableBytes).Trim()))
+    }
+    if ($entry.PSObject.Properties['Denied'] -and $entry.Denied -gt 0) {
+        $warnings.Add("$($entry.Denied) folder(s) inside could not be read; the size is a lower bound")
+    }
+    if ($toolMissing) { $evidence.Add("$toolMissing is not on PATH; removal deletes the folder directly") }
+    foreach ($e in @(Get-WinnowExtra $Candidate 'Evidence')) { if ($e) { $evidence.Add($e) } }
+
+    $requiresClosed = @(@($Rule.RequiresClosed) + @(Get-WinnowExtra $Candidate 'RequiresClosed') | Where-Object { $_ })
+    $suppressReason = $null
+    if ($removable) {
+        $s = Test-WinnowSentinel -Path $path -Walk $Walk
+        if ($s.Blocked) {
+            $suppressReason = 'never removed: it ' + $s.Reason
+            if ($s.Samples) { $suppressReason += ' (' + ($s.Samples -join ', ') + ')' }
+        } else {
+            $suppressReason = Get-WinnowHoldReason -Path $path -RequiresClosed $requiresClosed -InFlight $InFlight
+        }
+        if ($s.NeedsConfirm -and -not $Rule.ExpectsDocuments -and $verdict -eq 'Clean') {
+            $verdict = 'YourCall'
+            $warnings.Add($s.Reason)
+        }
+        if (-not $suppressReason -and (Test-WinnowTreeLocked -Path $path)) {
+            $warnings.Add('some files are open; close the app that owns them for a complete removal')
+        }
+    }
 
     $findingArgs = @{
-        Rule       = $Rule
-        Path       = $path
-        RunId      = $RunId
-        Bytes      = $m.Bytes
-        Files      = $m.Files
-        Evidence   = $evidence
-        Warnings   = $warnings
-        Confidence = $conf.Score
-        Action     = $action
+        Rule           = $Rule
+        Path           = $path
+        Bytes          = $entry.Bytes
+        FreeableBytes  = $entry.FreeableBytes
+        Files          = $entry.Files
+        Evidence       = $evidence
+        Warnings       = $warnings
+        Verdict        = $verdict
+        Action         = $action
+        RequiresClosed = $requiresClosed
     }
     if ($newest) { $findingArgs['NewestWrite'] = $newest }
-    if ($Candidate.Extra -and $Candidate.Extra.PSObject.Properties['Title'] -and $Candidate.Extra.Title) {
-        $findingArgs['Title'] = $Candidate.Extra.Title
+    foreach ($k in @('Title', 'Id', 'Steps')) {
+        $v = Get-WinnowExtra $Candidate $k
+        if ($v) { $findingArgs[$k] = $v }
     }
 
     $finding = New-WinnowFinding @findingArgs
-    $finding.Suppressed = $suppressed
-    $finding.SuppressReason = $suppressReason
+    if ($suppressReason) {
+        $finding.Suppressed = $true
+        $finding.SuppressReason = $suppressReason
+    }
     return $finding
 }
 

@@ -4,7 +4,7 @@
 
 - Every removal goes through `Remove-WinnowPath` in `src/Winnow/Private/Remove-Safely.ps1`. No other file deletes or moves anything.
 - No literal paths in rules. Locations come from the tool, its environment variable or its default under a root such as `LOCALAPPDATA`.
-- Every rule has a `Consequence`: one sentence on what removing the item costs.
+- Every rule has a `Verdict` and a `Consequence`: one sentence on what removing the item costs.
 - No network calls, elevation, services, scheduled tasks or registry writes.
 - Windows PowerShell 5.1 syntax: no `? :`, `??`, `&&` or classes.
 
@@ -17,7 +17,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1 -Detail
 Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
 ```
 
-The tests need nothing installed. Fixtures go in a temporary `%LOCALAPPDATA%\winnow-selftest-*` folder, and one read-only scan of the machine checks every path the rules produce.
+The tests need nothing installed. Fixtures go in a temporary `%LOCALAPPDATA%\winnow-selftest-*` folder. A scan of a fake drive runs every rule end to end; a read-only scan of the machine follows, except on CI, where it runs only when the workflow is started by hand with full scan on. `SpaceWalker.cs` is compiled once per session; start a new one after changing it.
 
 ## Adding a rule
 
@@ -27,8 +27,7 @@ Rules live in `src/Winnow/Rules/*.rules.ps1`:
 @{
     Id       = 'cache.pip'
     Title    = 'pip wheel cache'
-    Category = 'PackageCache'              # PackageCache | AppCache | Installer
-    Tier     = 'Rebuildable'               # Transient | Rebuildable
+    Verdict  = 'Clean'                     # Clean | Move | YourCall | HandsOff
     Resolve  = @(
         @{ Type = 'Cli';  Command = 'pip'; Args = 'cache dir'; TimeoutSec = 20 }
         @{ Type = 'Env';  Name = 'PIP_CACHE_DIR' }
@@ -51,10 +50,14 @@ Rules live in `src/Winnow/Rules/*.rules.ps1`:
 | `Target = 'Children'`, `Keep = @(...)` | Offer each child folder separately, except those named |
 | `Target = 'Glob'`, `Glob = '*.nupkg'` | Offer matching files in the root |
 | `MinAgeDays` | Skip anything modified more recently |
-| `RequiresClosed = @('java')` | Warn while this process runs |
+| `RequiresClosed = @('java')` | Hold the item back while this process runs |
 | `AllowsInsideProject = @('node_modules')` | Allow this build folder inside a source project |
 | `ExpectsDocuments = $true` | Skip the documents check (never the key check) |
-| `Discover = { ... }` | A detector instead of `Resolve`; runs after tool rules and skips folders they own |
+| `Reclaim = @(@{ Type = 'ReportOnly' })` | Explain the item, never remove it |
+| `Steps = @(...)` | The steps `winnow explain` shows, for items Winnow does not act on |
+| `Discover = { ... }` | A detector instead of `Resolve`; runs after the drive walk and tool rules, and skips folders they own |
+
+A detector returns objects with a `Path` and an optional `Extra` holding `Title`, `Id`, `Evidence`, `Steps` or `RequiresClosed` for that item. Detectors read sizes and file names from the drive walk (`$script:WinnowWalk`) rather than the disk.
 
 A rule must never target a tool's settings, credentials, installed packages or virtual environments.
 

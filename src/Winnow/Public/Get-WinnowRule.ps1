@@ -1,7 +1,7 @@
 function Get-WinnowRule {
     <#
     .SYNOPSIS
-    Lists the loaded rules and what removing each one costs.
+    Lists the loaded rules, their verdicts and what removing each item costs.
 
     .EXAMPLE
     Get-WinnowRule
@@ -22,11 +22,11 @@ function Get-WinnowRule {
         $how = 'Delete'
         foreach ($step in @($r.Reclaim)) {
             if ($step.Type -eq 'VendorCli') { $how = "$($step.Command) $($step.Args)"; break }
+            if ($step.Type -eq 'ReportOnly') { $how = 'never removed'; break }
         }
         [pscustomobject]@{
             Id          = $r.Id
-            Tier        = $r.Tier
-            Category    = $r.Category
+            Verdict     = $script:WinnowVerdictNames[$r.Verdict]
             MinBytes    = (Format-WinnowBytes $r.MinBytes).Trim()
             MinAgeDays  = $r.MinAgeDays
             Reclaim     = $how
