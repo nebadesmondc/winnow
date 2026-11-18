@@ -78,18 +78,20 @@ Test-Case 'module imports cleanly' {
     Assert-True ([bool](Get-Command Invoke-Winnow -ErrorAction SilentlyContinue)) 'Invoke-Winnow not exported'
 }
 
-Test-Case 'only the four intended commands are exported' {
+Test-Case 'only the intended commands are exported' {
     $exported = (Get-Module Winnow).ExportedFunctions.Keys | Sort-Object
-    $expected = @('Get-WinnowReport', 'Get-WinnowRule', 'Invoke-Winnow', 'Invoke-WinnowClean')
+    $expected = @('Get-WinnowReport', 'Get-WinnowRule', 'Invoke-Winnow', 'Invoke-WinnowClean', 'Invoke-WinnowMove', 'Undo-WinnowMove')
     Assert-Equal ($expected -join ',') (($exported) -join ',')
 }
 
-Test-Case 'the delete primitive is not exported' {
-    Assert-False ([bool](Get-Command Remove-WinnowPath -ErrorAction SilentlyContinue)) 'Remove-WinnowPath is reachable from a session'
+Test-Case 'nothing that changes the disk or the environment is exported' {
+    foreach ($n in 'Remove-WinnowPath', 'Copy-WinnowTree', 'New-WinnowPrivateFolder', 'Set-WinnowUserVariable', 'Move-WinnowWslDisk', 'Stop-WinnowWslDistro') {
+        Assert-False ([bool](Get-Command $n -ErrorAction SilentlyContinue)) "$n is reachable from a session"
+    }
 }
 
-Test-Case 'no delete API exists outside Remove-Safely.ps1' {
-    Assert-NoPattern -What 'deletion APIs found outside the chokepoint' -ExceptFile @('Remove-Safely.ps1') -Pattern @(
+Test-Case 'nothing outside Change.ps1 deletes, copies, moves, or sets permissions or variables' {
+    Assert-NoPattern -What 'change APIs found outside Change.ps1' -ExceptFile @('Change.ps1') -Pattern @(
         'Remove-Item',
         '\[System\.IO\.File\]::Delete',
         '\[System\.IO\.Directory\]::Delete',
@@ -98,11 +100,30 @@ Test-Case 'no delete API exists outside Remove-Safely.ps1' {
         'rm -rf',
         '\.Delete\(\)',
         '(?i)\brobocopy\b',
-        '(?i)\bMove-Item\b',
+        '(?i)\bMove-Item\b', '(?i)\bCopy-Item\b', '(?i)\bxcopy\b', '(?i)\[System\.IO\.File\]::(Copy|Move)',
         '(?i)\bClear-Content\b',
         '\bFile\.Delete\(', '\bDirectory\.Delete\(', '(?i)DeleteFile', '(?i)DeleteDirectory',
-        '(?i)RemoveDirectory', '(?i)MoveFile', '(?i)SendToRecycleBin'
+        '(?i)RemoveDirectory', '(?i)MoveFile', '(?i)CopyFile', '(?i)SendToRecycleBin',
+        '(?i)SetEnvironmentVariable', '(?i)SetAccessControl', '(?i)\bSet-Acl\b', '(?i)\bicacls\b', '(?i)\btakeown\b',
+        "(?i)'--(manage|terminate|shutdown|import|export|set-default)\b"
     )
+}
+
+Test-Case 'Winnow never unregisters a WSL distribution' {
+    Assert-NoPattern -What 'unregister found' -Pattern @('(?i)--unregister')
+}
+
+Test-Case 'a move sets only variables its rules name, never PATH or a Windows variable' {
+    $m = Get-Module Winnow
+    foreach ($n in 'PATH', 'Path', 'TEMP', 'WINNOW_NOT_A_RULE_VARIABLE') {
+        $threw = $false
+        try { & $m { param($x) Set-WinnowUserVariable -Name $x -Value 'C:\nowhere' } $n } catch { $threw = $true }
+        Assert-True $threw "Set-WinnowUserVariable accepted '$n'"
+    }
+    foreach ($bad in @(@{ Id = 'x'; Title = 'x'; Env = 'PATH' }, @{ Id = 'x'; Title = 'x'; Env = 'localappdata' },
+                       @{ Id = 'x'; Title = 'x' }, @{ Id = 'X Y'; Title = 'x'; Env = 'A_B' })) {
+        Assert-True ([bool](& $m { param($x) Test-WinnowMoveSpec -Move $x } $bad)) "a Move block was accepted: $(($bad.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ')"
+    }
 }
 
 Test-Case 'the native walker only lists folders' {
@@ -771,10 +792,28 @@ Test-Case 'virtual disks: WSL and Docker are told apart from other disks' {
     } $base $distros
     Assert-Equal 1 $found.wsl.Count 'the WSL distribution was not found once'
     Assert-Equal 'wsl-test-distro' $found.wsl[0].Extra.Id
-    Assert-True (($found.wsl[0].Extra.Steps -join ' ') -match 'wsl --manage Test-Distro --move') 'the move step does not name the distribution'
     Assert-Equal 1 $found.docker.Count 'the Docker disk was not found once'
     Assert-Equal 'docker' $found.docker[0].Extra.Id
     Assert-Equal 'machine.vmdk' (($found.other | ForEach-Object { [System.IO.Path]::GetFileName($_.Path) }) -join ',')
+}
+
+Test-Case 'what keeps a distribution running is named: editor windows, Docker, terminals' {
+    $settings = Join-Path $sandbox 'docker-settings.json'
+    Set-Content -LiteralPath $settings -Value '{"IntegratedWslDistros":["Ubuntu-24.04"]}' -Encoding ascii
+    $procs = @(
+        [pscustomobject]@{ Name = 'Code.exe'; ProcessId = 10; ParentProcessId = 1; CommandLine = '"Code.exe" --folder-uri=vscode-remote://wsl%2Bubuntu-24.04/home/me/app' }
+        [pscustomobject]@{ Name = 'wsl.exe'; ProcessId = 11; ParentProcessId = 10; CommandLine = 'wsl.exe -d Ubuntu-24.04 sh -c "server"' }
+        [pscustomobject]@{ Name = 'wsl.exe'; ProcessId = 12; ParentProcessId = 2; CommandLine = '"C:\WINDOWS\system32\wsl.exe" -d Ubuntu-24.04' }
+        [pscustomobject]@{ Name = 'wsl.exe'; ProcessId = 13; ParentProcessId = 2; CommandLine = 'wsl.exe -d Debian' }
+        [pscustomobject]@{ Name = 'Docker Desktop.exe'; ProcessId = 14; ParentProcessId = 2; CommandLine = '"Docker Desktop.exe"' }
+    )
+    $text = (@(& $M { param($p, $s) Get-WinnowWslHolder -Name 'Ubuntu-24.04' -Process $p -DockerSettings $s } $procs $settings)) -join ' | '
+    Assert-True ($text -match 'VS Code has a window open on Ubuntu-24.04') "the editor is not named: $text"
+    Assert-True ($text -match 'pid 12') "the terminal is not named: $text"
+    Assert-False ($text -match 'pid 1[13]') "a process that is not a terminal on it is named: $text"
+    Assert-True ($text -match 'Docker Desktop') "Docker is not named: $text"
+    $other = (@(& $M { param($p, $s) Get-WinnowWslHolder -Name 'Debian' -Process $p -DockerSettings $s } $procs $settings)) -join ' | '
+    Assert-True ($other -match 'pid 13' -and $other -notmatch 'VS Code|Docker') "wrong holders for Debian: $other"
 }
 
 function New-Fixture {
@@ -862,7 +901,7 @@ function Test-ScanInvariant {
     param([object]$Scan, [string]$Label)
 
     Test-Case "${Label}: the scan reports no rule errors" {
-        Assert-Equal 'winnow/report/2' $Scan.Schema
+        Assert-Equal 'winnow/report/3' $Scan.Schema
         Assert-Equal 0 $Scan.RuleErrors.Count "rule errors: $(($Scan.RuleErrors | ForEach-Object { $_.RuleId + ': ' + $_.Message }) -join '; ')"
     }
 
@@ -902,6 +941,19 @@ function Test-ScanInvariant {
                     $a.StartsWith($b + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
                     throw "'$a' is counted, and so is '$b' which contains it"
                 }
+            }
+        }
+    }
+
+    Test-Case "${Label}: what can move is on the drive, once, and its old folder passes the guard" {
+        $ids = @{}
+        foreach ($mv in $Scan.Movable) {
+            Assert-False $ids.ContainsKey($mv.Id) "two movable items share the id $($mv.Id)"
+            $ids[$mv.Id] = $true
+            Assert-True ($mv.Path.StartsWith($Scan.Drive.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) "$($mv.Id) is not on $($Scan.Drive)"
+            if ($mv.Kind -eq 'Variable' -and -not $mv.Blocker) {
+                $v = Guard $mv.Path
+                Assert-True $v.Allowed "$($mv.Id) would leave '$($mv.Path)' behind, which the guard refuses: $($v.Reason)"
             }
         }
     }
@@ -958,11 +1010,64 @@ $disk = Join-Path $fakeLocal 'Docker\wsl\disk\docker_data.vhdx'
 [void](New-Item -ItemType Directory -Path (Split-Path $disk -Parent) -Force)
 $fs = [System.IO.File]::Create($disk); $fs.SetLength(64MB); $fs.Close()
 
+# Tool homes a move can take, each named by its variable as the tool in use.
+# toolx is asked through cmd, so one move is always checked by a real answer;
+# tooly always names another folder, so its move must be put back.
+$toolHomes = [ordered]@{
+    'npm'    = @{ Var = 'NPM_CONFIG_CACHE';  Home = 'npm-cache';      Blob = '_cacache\content-v2\blob'; Tool = 'npm' }
+    'pip'    = @{ Var = 'PIP_CACHE_DIR';     Home = 'pip\cache';      Blob = 'http\blob';                Tool = 'pip' }
+    'uv'     = @{ Var = 'UV_CACHE_DIR';      Home = 'uv\cache';       Blob = 'archive-v0\blob';          Tool = 'uv' }
+    'nuget'  = @{ Var = 'NUGET_PACKAGES';    Home = 'nuget\packages'; Blob = 'pkg\1.0.0\pkg.nupkg';      Tool = 'dotnet' }
+    'go-mod' = @{ Var = 'GOMODCACHE';        Home = 'go\mod';         Blob = 'cache\download\blob';      Tool = 'go' }
+    'toolx'  = @{ Var = 'WINNOW_TEST_TOOLX'; Home = 'ToolX\cache';    Blob = 'a\blob';                   Tool = 'cmd' }
+    'tooly'  = @{ Var = 'WINNOW_TEST_TOOLY'; Home = 'ToolY\cache';    Blob = 'a\blob';                   Tool = 'cmd' }
+}
+foreach ($t in $toolHomes.Values) {
+    $t.Path = Join-Path $fakeLocal $t.Home
+    New-Blob (Join-Path $t.Path $t.Blob) 1MB
+    New-Fixture (Join-Path $t.Path 'second\file.txt')
+}
+$testRules = Join-Path $sandbox 'test-rules'
+New-Fixture (Join-Path $testRules 'test.rules.ps1') @'
+@(
+    @{ Id = 'test.toolx'; Title = 'ToolX cache'; Verdict = 'Clean'; Consequence = 'test only'
+       Resolve = @(@{ Type = 'Env'; Name = 'WINNOW_TEST_TOOLX' })
+       Move = @{ Id = 'toolx'; Title = 'ToolX cache'; Env = 'WINNOW_TEST_TOOLX'; Verify = @{ Command = 'cmd'; Args = '/d /c echo %WINNOW_TEST_TOOLX%' } } }
+    @{ Id = 'test.tooly'; Title = 'ToolY cache'; Verdict = 'Clean'; Consequence = 'test only'
+       Resolve = @(@{ Type = 'Env'; Name = 'WINNOW_TEST_TOOLY' })
+       Move = @{ Id = 'tooly'; Title = 'ToolY cache'; Env = 'WINNOW_TEST_TOOLY'; Verify = @{ Command = 'cmd'; Args = '/d /c echo C:\somewhere\else' } } }
+)
+'@
+
+# A move needs a second fixed drive with room.
+$otherSandbox = $null
+foreach ($d in [System.IO.DriveInfo]::GetDrives()) {
+    if ($d.DriveType -ne 'Fixed' -or -not $d.IsReady -or $d.AvailableFreeSpace -lt 3GB) { continue }
+    if ($d.Name.Substring(0, 1) -eq $sysDrive.Substring(0, 1)) { continue }
+    $otherSandbox = Join-Path $d.Name ('winnow-selftest-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    break
+}
+# Only on a CI runner does a move write the user's environment.
+$userVariables = ($env:GITHUB_ACTIONS -eq 'true')
+
 $savedEnv = @{ USERPROFILE = $env:USERPROFILE; LOCALAPPDATA = $env:LOCALAPPDATA; APPDATA = $env:APPDATA; TEMP = $env:TEMP }
+$savedUserEnv = @{}
+foreach ($t in $toolHomes.Values) {
+    $savedEnv[$t.Var] = [Environment]::GetEnvironmentVariable($t.Var, 'Process')
+    $savedUserEnv[$t.Var] = [Environment]::GetEnvironmentVariable($t.Var, 'User')
+}
 try {
     $env:USERPROFILE = $fakeHome; $env:LOCALAPPDATA = $fakeLocal; $env:APPDATA = $fakeRoaming
     $env:TEMP = Join-Path $fakeLocal 'Temp'
-    & $M { Reset-WinnowGuardPolicy; foreach ($r in (Import-WinnowRule -Refresh)) { $r.MinBytes = 0 } }
+    foreach ($t in $toolHomes.Values) { [Environment]::SetEnvironmentVariable($t.Var, $t.Path, 'Process') }
+    & $M {
+        param($extra, $userVariables)
+        Reset-WinnowGuardPolicy
+        $all = @(Import-WinnowRule -RulePath $extra) + @(Import-WinnowRule -Refresh)
+        foreach ($r in $all) { $r.MinBytes = 0; if ($r.Move) { $r.Move.MinBytes = 0 } }
+        $script:WinnowRules = $all
+        if (-not $userVariables) { $script:WinnowVariableTarget = 'Process' }
+    } $testRules $userVariables
     $fakeScan = & $M { param($root) Invoke-WinnowScan -Root $root -NoProgress } $fake
 
     Test-ScanInvariant -Scan $fakeScan -Label 'fake drive'
@@ -978,6 +1083,12 @@ try {
             'Users\me\AppData\Local\Chat\app-1.0.0'                   = 'stale.squirrel:YourCall'
             'Users\me\.vscode\extensions\pub.tool-1.0.0'              = 'stale.extension:YourCall'
             'Users\me\AppData\Local\Docker\wsl\disk\docker_data.vhdx' = 'vdisk.docker:Move'
+            'Users\me\AppData\Local\npm-cache\_cacache'               = 'cache.npm:Clean'
+            'Users\me\AppData\Local\pip\cache'                        = 'cache.pip:Clean'
+            'Users\me\AppData\Local\nuget\packages'                   = 'cache.nuget:Clean'
+            'Users\me\AppData\Local\go\mod'                           = 'cache.go.mod:Clean'
+            'Users\me\AppData\Local\ToolX\cache'                      = 'test.toolx:Clean'
+            'Users\me\AppData\Local\ToolY\cache'                      = 'test.tooly:Clean'
         }
         foreach ($k in $want.Keys) {
             Assert-True $found.ContainsKey($k) "not found: $k (found: $(($found.Keys | Sort-Object) -join ', '))"
@@ -998,12 +1109,14 @@ try {
     }
 
     Test-Case 'fake drive: a second scan gives the same ids' {
-        $again = & $M { param($root) Invoke-WinnowScan -Root $root -NoProgress -RuleId 'appcache.conventional', 'stale.squirrel' } $fake
-        Assert-True ($again.Findings.Count -ge 2) 'the second scan found nothing'
-        foreach ($f in $again.Findings) {
-            $same = @($fakeScan.Findings | Where-Object { $_.RuleId -eq $f.RuleId -and $_.Path -eq $f.Path })
-            Assert-Equal 1 $same.Count "$($f.Path) was not in the first scan"
-            Assert-Equal $same[0].Id $f.Id "the id of $($f.Title) changed between scans"
+        $rules = 'appcache.conventional', 'stale.squirrel'
+        $again = & $M { param($root, $r) Invoke-WinnowScan -Root $root -NoProgress -RuleId $r } $fake $rules
+        $first = @($fakeScan.Findings | Where-Object { $rules -contains $_.RuleId })
+        Assert-True ($first.Count -ge 2) 'the first scan found nothing to compare'
+        foreach ($f in $first) {
+            $same = @($again.Findings | Where-Object { $_.RuleId -eq $f.RuleId -and $_.Path -eq $f.Path })
+            Assert-Equal 1 $same.Count "$($f.Path) was not found again"
+            Assert-Equal $f.Id $same[0].Id "the id of $($f.Title) changed between scans"
         }
     }
 
@@ -1011,9 +1124,118 @@ try {
         Invoke-WinnowClean -Report $fakeScan -WhatIf -Quiet | Out-Null
         foreach ($f in $fakeScan.Findings) { Assert-True (Test-Path -LiteralPath $f.Path) "$($f.Path) is gone after -WhatIf" }
     }
+
+    Test-Case 'fake drive: what can move is listed with the folder the tool uses' {
+        $byId = @{}
+        foreach ($m in $fakeScan.Movable) { $byId[$m.Id] = $m }
+        foreach ($id in @($toolHomes.Keys) + 'docker') {
+            Assert-True $byId.ContainsKey($id) "'$id' cannot move (movable: $(($byId.Keys | Sort-Object) -join ', '))"
+        }
+        foreach ($id in $toolHomes.Keys) { Assert-Equal $toolHomes[$id].Path $byId[$id].Path "$id would move the wrong folder" }
+        Assert-Equal 'Guided' $byId['docker'].Kind 'Docker is moved by Winnow'
+    }
+
+    Test-Case 'fake drive: winnow move docker gives the steps and changes nothing' {
+        $out = Invoke-WinnowMove docker -Report $fakeScan -Confirm:$false 6>&1 | Out-String
+        Assert-True ($out -match 'Disk image location') "no steps shown: $out"
+        Assert-True (Test-Path -LiteralPath $disk) 'the Docker disk is gone'
+    }
+
+    if (-not $otherSandbox) {
+        Write-Host '  (moves skipped: no second fixed drive with 3 GB free)' -ForegroundColor DarkGray
+    } else {
+        Test-Case 'fake drive: winnow move asks once; Enter alone changes nothing' {
+            $dest = Join-Path $otherSandbox 'prompt'
+            & $M {
+                param($report, $to)
+                $script:TestAnswer = ''
+                function script:Read-Host { $script:TestAnswer }
+                try {
+                    $script:WinnowLastReport = $report
+                    Invoke-Winnow move toolx -To $to 6>&1 | Out-Null
+                } finally {
+                    Remove-Item -Path Function:\Read-Host
+                    $script:WinnowLastReport = $null
+                }
+            } $fakeScan $dest
+            Assert-True (Test-Path -LiteralPath $toolHomes['toolx'].Path) 'Enter alone moved the folder'
+            Assert-False (Test-Path -LiteralPath $dest) 'Enter alone created the destination'
+            Assert-Equal $toolHomes['toolx'].Path $env:WINNOW_TEST_TOOLX 'Enter alone changed the variable'
+        }
+
+        Test-Case 'fake drive: a move the tool does not confirm is put back' {
+            $t = $toolHomes['tooly']
+            [void](New-Item -ItemType Directory -Path $otherSandbox -Force)
+            $dest = Join-Path $otherSandbox 'new-parent\tooly'
+            $files = @(Get-ChildItem -LiteralPath $t.Path -Recurse -File).Count
+            $rec = Invoke-WinnowMove tooly -Report $fakeScan -To $dest -Quiet -Confirm:$false
+            Assert-Equal 'failed' $rec.State 'the move was reported done'
+            Assert-True ($rec.Reason -match 'somewhere') "unexpected reason: $($rec.Reason)"
+            Assert-Equal $files @(Get-ChildItem -LiteralPath $t.Path -Recurse -File).Count 'the original lost files'
+            Assert-False (Test-Path -LiteralPath (Split-Path $dest -Parent)) 'the copy, or the folder made for it, was left behind'
+            Assert-Equal $t.Path $env:WINNOW_TEST_TOOLY 'the variable was not put back'
+            if ($userVariables) { Assert-Equal $null ([Environment]::GetEnvironmentVariable('WINNOW_TEST_TOOLY', 'User')) 'the user variable was not put back' }
+        }
+
+        foreach ($id in @($toolHomes.Keys | Where-Object { $_ -ne 'tooly' })) {
+            $t = $toolHomes[$id]
+            $body = {
+                $dest = Join-Path $otherSandbox $id
+                $files = @(Get-ChildItem -LiteralPath $t.Path -Recurse -File).Count
+                $asked = [bool](Get-Command $t.Tool -CommandType Application -ErrorAction SilentlyContinue)
+
+                $rec = Invoke-WinnowMove $id -Report $fakeScan -To $dest -Quiet -Confirm:$false
+                Assert-Equal 'done' $rec.State "not moved: $($rec.Reason)"
+                Assert-False (Test-Path -LiteralPath $t.Path) 'the old folder is still there'
+                # npm writes a log into its cache each time it is asked.
+                Assert-True (@(Get-ChildItem -LiteralPath $dest -Recurse -File).Count -ge $files) 'files went missing'
+                Assert-Equal $dest ([Environment]::GetEnvironmentVariable($t.Var, 'Process')) "$($t.Var) does not name the new folder"
+                if ($userVariables) { Assert-Equal $dest ([Environment]::GetEnvironmentVariable($t.Var, 'User')) 'the user variable was not set' }
+                if ($asked) { Assert-True ($rec.Checked -match 'reports') "$($t.Tool) was not asked: $($rec.Checked)" }
+                $acl = Get-Acl -LiteralPath $dest
+                Assert-True $acl.AreAccessRulesProtected 'the new folder inherits permissions from its drive'
+                $inner = Get-Acl -LiteralPath (Join-Path $dest $t.Blob)
+                Assert-True (@($inner.Access | Where-Object { -not $_.IsInherited }).Count -eq 0) 'a copied file carries its own permissions'
+
+                $undo = Undo-WinnowMove $id -Quiet -Confirm:$false
+                Assert-Equal 'undone' $undo.State 'the move was not undone'
+                Assert-True (@(Get-ChildItem -LiteralPath $t.Path -Recurse -File).Count -ge $files) 'not everything came back'
+                Assert-False (Test-Path -LiteralPath $dest) 'the moved copy is still there'
+                Assert-Equal $t.Path ([Environment]::GetEnvironmentVariable($t.Var, 'Process')) "$($t.Var) was not put back"
+                if ($userVariables) { Assert-Equal $null ([Environment]::GetEnvironmentVariable($t.Var, 'User')) 'the user variable was not removed' }
+                if ($asked) { Assert-True ($undo.Checked -match 'reports') "$($t.Tool) was not asked after the undo: $($undo.Checked)" }
+            }.GetNewClosure()
+            Test-Case "fake drive: $id moves to another drive and back, and $($t.Tool) finds it each time" $body
+        }
+
+        Test-Case 'fake drive: a move''s folder is open only to the user, SYSTEM and Administrators' {
+            $dest = & $M { param($d, $s) New-WinnowPrivateFolder -Path $d -Source $s } (Join-Path $otherSandbox 'acl') $toolHomes['toolx'].Path
+            $want = @([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544') | Sort-Object
+            $acl = Get-Acl -LiteralPath $dest
+            $got = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object)
+            Assert-Equal ($want -join ',') ($got -join ',') 'unexpected people can open the folder'
+            foreach ($a in $acl.Access) {
+                Assert-Equal 'FullControl' ([string]$a.FileSystemRights) "rights: $($a.FileSystemRights)"
+                Assert-Equal 'ContainerInherit, ObjectInherit' ([string]$a.InheritanceFlags) 'the folder''s contents would not inherit'
+            }
+        }
+
+        Test-Case 'a move refuses a folder that is not empty, the same drive, a drive root and Windows' {
+            $full = Join-Path $otherSandbox 'not-empty'
+            New-Fixture (Join-Path $full 'x.txt')
+            $src = $toolHomes['toolx'].Path
+            foreach ($bad in @($full, (Join-Path $sandbox 'same-drive'), ($otherSandbox.Substring(0, 3)), (Join-Path $win 'x'), '\\server\share\x', 'relative\x')) {
+                $v = & $M { param($p, $s) Test-WinnowMoveDestination -Path $p -Source $s } $bad $src
+                Assert-False $v.Allowed "a move to '$bad' was allowed"
+            }
+        }
+    }
 } finally {
     foreach ($k in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedEnv[$k], 'Process') }
-    & $M { Reset-WinnowGuardPolicy; Import-WinnowRule -Refresh | Out-Null; $script:WinnowLastReport = $null }
+    if ($userVariables) {
+        foreach ($k in $savedUserEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedUserEnv[$k], 'User') }
+    }
+    & $M { Reset-WinnowGuardPolicy; Import-WinnowRule -Refresh | Out-Null; $script:WinnowLastReport = $null; $script:WinnowVariableTarget = 'User' }
 }
 
 # ==========================================================================
@@ -1045,6 +1267,9 @@ if (Test-Path $sandbox) {
         Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint } |
         ForEach-Object { [void](Start-Process cmd.exe -ArgumentList @('/d', '/c', 'rmdir', "`"$($_.FullName)`"") -NoNewWindow -Wait) }
     [System.IO.Directory]::Delete($sandbox, $true)
+}
+if ($otherSandbox -and (Test-Path -LiteralPath $otherSandbox)) {
+    [System.IO.Directory]::Delete($otherSandbox, $true)
 }
 
 # ==========================================================================
