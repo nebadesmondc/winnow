@@ -1,0 +1,35 @@
+name: Add a rule for a tool
+description: A tool whose cache or leftovers Winnow should know about.
+title: Add a rule for <tool>
+body:
+  - type: input
+    id: tool
+    attributes:
+      label: Tool
+      description: Its name and website.
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where it keeps the folder
+      description: The command that prints the folder (such as `npm config get cache`), the environment variable that sets it, and its default location.
+    validations:
+      required: true
+  - type: input
+    id: cost
+    attributes:
+      label: What removing it costs
+      description: One sentence, such as "Packages download again on the next install."
+    validations:
+      required: true
+  - type: input
+    id: docs
+    attributes:
+      label: Official docs
+      description: A page that documents the folder or the tool's own clean command.
+  - type: textarea
+    id: size
+    attributes:
+      label: Size on your machine
+      description: Optional. How big the folder is, or the line `winnow` shows for it.
