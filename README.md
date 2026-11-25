@@ -34,21 +34,28 @@ Winnow shows where the space on your Windows system drive went and gets it back 
 - **Guarded removal:** Windows, installed programs, user folders, credentials, virtual disks and source projects are always refused. See [SAFETY.md](SAFETY.md).
 - **No dependencies:** Windows PowerShell 5.1 or PowerShell 7, no admin rights, no network access.
 
-## Quickstart
+## Install
 
-Requires Windows 10 or 11.
+Requires Windows 10 or 11. In PowerShell 7:
 
 ```powershell
-git clone https://github.com/nebadesmondc/winnow.git
-cd winnow
-.\tools\winnow.cmd    # the space map; changes nothing
+Install-Module Winnow
+winnow                  # the space map; changes nothing
 ```
+
+In Windows PowerShell 5.1, the one built into Windows, the first time:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   # Windows blocks all scripts by default
+Install-Module Winnow -Scope CurrentUser              # answer Y to the NuGet provider and the PSGallery prompts
+winnow
+```
+
+To run from a clone instead: `git clone https://github.com/nebadesmondc/winnow.git`, then `.\winnow\tools\winnow.cmd`.
 
 ## Usage
 
 ```powershell
-Import-Module .\src\Winnow\Winnow.psd1
-
 winnow                  # the space map
 winnow explain <id>     # what an item is, what removing it costs, the steps
 winnow clean            # remove every Clean item, after one yes
@@ -60,11 +67,28 @@ winnow undo [<id>]      # reverse the last move, or the named one
 
 For scripts, `Get-WinnowReport` returns the report object, `Invoke-WinnowClean -WhatIf` and `Invoke-WinnowMove -WhatIf` show a plan, `Undo-WinnowMove` reverses a move, and `Get-WinnowRule` lists the rules. Each cleanup is recorded in `%LOCALAPPDATA%\Winnow\runs`, each move in `%LOCALAPPDATA%\Winnow\moves`.
 
+## Verify a release
+
+Each [release](https://github.com/nebadesmondc/winnow/releases) lists the SHA-256 of every file, and its zip carries a GitHub build attestation:
+
+```powershell
+gh attestation verify Winnow-0.1.0.zip --repo nebadesmondc/winnow
+```
+
+To check an installed copy, download the release's `SHA256SUMS.txt` and run this next to it; no output means every file matches:
+
+```powershell
+$base = (Get-Module Winnow -ListAvailable | Sort-Object Version -Descending)[0].ModuleBase
+Get-Content .\SHA256SUMS.txt | ForEach-Object { $h, $p = $_ -split '  ', 2; if ((Get-FileHash (Join-Path $base $p)).Hash -ne $h) { "differs: $p" } }
+```
+
 ## Development
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1
 ```
+
+A `v*` tag runs `build/Build-Release.ps1` in CI, attests the zip, creates the GitHub release and publishes to the PowerShell Gallery.
 
 ## Docs
 

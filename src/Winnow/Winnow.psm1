@@ -14,6 +14,12 @@ $script:WinnowRules          = $null
 $script:WinnowLastReport     = $null
 $script:WinnowWalk           = $null
 
+# App Control and similar device policies run unsigned scripts in
+# ConstrainedLanguage mode, which blocks Add-Type and most .NET calls.
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    throw "Winnow needs PowerShell's FullLanguage mode, but a device policy runs it in $($ExecutionContext.SessionState.LanguageMode) mode. Nothing was changed."
+}
+
 # Compiled once per session; a changed SpaceWalker.cs needs a new session.
 if (-not ('Winnow.SpaceWalker' -as [type])) {
     Add-Type -Path (Join-Path $PSScriptRoot 'Private\SpaceWalker.cs')
