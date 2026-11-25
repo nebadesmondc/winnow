@@ -2,12 +2,13 @@
 
 ## Guarantees
 
-- A scan only reads. Nothing changes until a cleanup is confirmed.
+- A scan only reads. Nothing changes until a cleanup or a move is confirmed.
 - Every rule states a verdict and what removing its item costs; a rule without them does not load.
 - Windows, installed programs, user folders, credentials, virtual disks and source projects are refused whatever a rule says.
 - Items in use (a running program, an update being installed) are held back.
-- All removals go through one function, which checks the guard every time.
-- No network access, no telemetry, no admin rights, no services, scheduled tasks or registry writes.
+- Every change happens in one file, `Change.ps1`; each delete there checks the guard.
+- A move deletes the old copy only after the tool names the new folder, and writes a record that `winnow undo` reverses.
+- No network access, no telemetry, no admin rights, no services or scheduled tasks. The only registry write is the user environment variable a move sets, from the list the rules name; `PATH` and Windows' own variables are never changed.
 - Freed space is measured, and anything not removed is listed with the reason.
 
 ## Verdicts
@@ -15,13 +16,13 @@
 | Verdict | Means | What Winnow does |
 |---|---|---|
 | Clean | Rebuilds itself; the cost is a re-download or a slower first start | Removes it on `winnow clean` |
-| Move | Needed, but not on the system drive | Explains how to move it; never removes it |
+| Move | Needed, but not on the system drive | Moves it on `winnow move`; never removes it |
 | Your call | Only you can know | Removes it only when you name its id, to the Recycle Bin |
 | Hands off | Windows manages it | Explains it and gives the official steps; never acts |
 
-Virtual disks, the pagefile and the hibernation file are reported only, whatever their verdict.
+Winnow never deletes a virtual disk, the pagefile or the hibernation file. A WSL distribution is moved by WSL itself; Docker Desktop's disk moves with Docker's own setting, for which Winnow gives the steps.
 
-## From scan to removal
+## From scan to change
 
 ```
 walk       measure the system drive, read-only   src/Winnow/Private/SpaceWalker.cs
@@ -31,11 +32,13 @@ scan       rules find candidates                 src/Winnow/Private/RuleEngine.p
 map        items with verdict, cost, evidence    src/Winnow/Private/SpaceMap.ps1
 confirm    one confirmation for the whole plan   src/Winnow/Public/Invoke-Winnow.ps1
 remove     in-use check, guard, delete, measure  src/Winnow/Public/Invoke-WinnowClean.ps1
-                                                 src/Winnow/Private/Remove-Safely.ps1
-record     JSON run record                       %LOCALAPPDATA%\Winnow\runs\
+move       copy, point the tool, check, delete   src/Winnow/Public/Invoke-WinnowMove.ps1
+                                                 src/Winnow/Private/Move.ps1
+change     the only file that changes anything   src/Winnow/Private/Change.ps1
+record     JSON run and move records             %LOCALAPPDATA%\Winnow\runs\ and \moves\
 ```
 
-`Invoke-WinnowClean` takes no path parameter; it only acts on items from a scan.
+`Invoke-WinnowClean` takes no path parameter and `Invoke-WinnowMove` takes no source path; both act only on items from a scan.
 
 ## The walk
 
@@ -62,6 +65,8 @@ record     JSON run record                       %LOCALAPPDATA%\Winnow\runs\
 
 An installed editor extension (a folder directly in `~\.vscode\extensions` and similar) carries a `package.json` but is not a source project; with a `.git` folder it is.
 
+Check 12 has one exception: the folder a move record names as its destination, so an undo or a failed move can remove the copy Winnow made. Checks 1 to 11 still apply to it.
+
 ## Before an item is offered
 
 - **Size and age:** each rule sets a minimum size, some a minimum age.
@@ -82,19 +87,30 @@ An installed editor extension (a folder directly in `~\.vscode\extensions` and s
 - `Remove-WinnowPath`: checks the guard, measures, detaches every link inside the folder, deletes (retrying without read-only attributes, then with `robocopy` as a last resort), and measures what is left.
 - Each run writes `%LOCALAPPDATA%\Winnow\runs\<run id>.json`: what was planned and removed, bytes per item, drive free-space change, and anything left with the reason.
 
+## Moving
+
+- **What moves:** the tool homes a rule's `Move` names (npm, pip, uv, the Gradle home, NuGet packages, the Go module and build caches, Playwright, Pub) and WSL distributions. Docker Desktop's disk gets steps only.
+- **Where:** an empty or new folder on another fixed disk, with the item's size plus 10% and 1 GB free. Never the same drive, a drive root, Windows, Program Files, user folders, cloud sync folders or a path through a link. By default `<drive>:\DevCache\<id>` or `<drive>:\WSL\<name>` on the drive with most room, SSDs first.
+- **Permissions:** the new folder is open to you, SYSTEM and Administrators only. They are set on that folder alone and everything copied in inherits them; nothing is changed file by file.
+- **A cache:** `winnow move` lists the plan and asks once. The folder is copied with `robocopy` (data, attributes and timestamps; not permissions, not links) and the file counts compared. The tool's variable is then set for your account (`HKCU\Environment`) and this session, and the tool is asked where its cache is (`npm config get cache`, `pip cache dir`). Only when it names the new folder is the old one deleted, through `Remove-WinnowPath`. Any failure before that removes the copy and restores the variable.
+- **Not moved:** a folder with links inside or folders that cannot be read; anything a running program uses or whose app must be closed; a Pub cache whose global tools are on `PATH`.
+- **A WSL distribution:** stopped with `wsl --terminate`, moved with `wsl --manage <name> --move <folder>`, then started once to check it works; if it does not start, WSL moves it back. WSL lets go of a stopped distribution's disk only when its VM idles out, so Winnow waits up to three minutes. If other distributions keep the disk open, Winnow names them and stops; it never shuts WSL down. Editor windows, terminals and Docker Desktop's integration that keep restarting it are named.
+- **Undo:** `winnow undo` copies a cache back, restores the variable to its earlier value or removes it, asks the tool, then deletes the moved copy. A WSL distribution is moved back by WSL.
+- Each move writes `%LOCALAPPDATA%\Winnow\moves\<move id>.json` before it starts: where from and to, the variable's earlier value, what the tool answered, and the outcome.
+
 ## Processes and files
 
-- **Started:** `uv`, `npm`, `pnpm` and `pip`, with fixed arguments from the rules, a timeout, the profile folder as working directory and update checks off (`NO_UPDATE_NOTIFIER`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_OFFLINE`, `DO_NOT_TRACK`). `npm` and `pnpm` start through `cmd.exe`. `robocopy.exe` runs only inside `Remove-WinnowPath`.
-- **Read:** folder listings; installed programs, WSL distributions and the Fast Startup setting from the registry; pagefile use and memory size through CIM; `.pem` files the sentinel finds, editor manifests, `product.json` and `extensions.json`.
-- **Written:** run records under `%LOCALAPPDATA%\Winnow\runs` only.
+- **Started:** `uv`, `npm`, `pnpm`, `pip`, `dotnet` and `go`, with fixed arguments from the rules, a timeout, the profile folder as working directory and update checks off (`NO_UPDATE_NOTIFIER`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_OFFLINE`, `DO_NOT_TRACK`, `DOTNET_CLI_TELEMETRY_OPTOUT`). `npm` and `pnpm` start through `cmd.exe`. `wsl` lists, stops, moves and starts a distribution as above. `robocopy.exe` runs only in `Change.ps1`.
+- **Read:** folder listings; installed programs, WSL distributions and the Fast Startup setting from the registry; pagefile use, memory size, disk types and process command lines through CIM; `.pem` files the sentinel finds, editor manifests, `product.json`, `extensions.json` and Docker Desktop's `settings-store.json`.
+- **Written:** run and move records under `%LOCALAPPDATA%\Winnow`; a move's destination folder; the user environment variable a move sets.
 
 ## Tests
 
-`tests/Run-Tests.ps1` needs nothing installed and runs in CI on every push, on Windows PowerShell 5.1 and PowerShell 7.
+`tests/Run-Tests.ps1` needs nothing installed and runs in CI on every pull request, on Windows PowerShell 5.1 and PowerShell 7.
 
 | Guarantee | Tests |
 |---|---|
-| One removal path | no delete API outside Remove-Safely.ps1, including the walker; delete primitive not exported |
+| One change file | no delete, copy, move, permission or environment API outside `Change.ps1`, including the walker; none of it exported |
 | Read-only walk | the walker opens folders for listing only; hard links count once; junctions are not followed |
 | Offline | no network API; child processes run with update checks off |
 | No admin | no elevation, service or scheduled-task API |
@@ -106,6 +122,9 @@ An installed editor extension (a folder directly in `~\.vscode\extensions` and s
 | Older versions | only versions older than the one in use; a pending update is not stale |
 | Numbers | freed space measured on disk; the map places every byte once; no finding inside another |
 | Whole scan | a fake drive with one item of each kind: each is found with its verdict, the one holding a key is held back |
+| Moves | each cache moves to a second drive and back, and the tool names the folder each time; a move the tool does not confirm is put back; Enter alone changes nothing; the new folder is private and its contents inherit; bad destinations are refused |
+| Variables | only variables a rule names, never `PATH` or Windows' own; user variables are written only on CI |
+| WSL | what keeps a distribution running is named; Winnow never unregisters a distribution |
 | Recycle Bin | Your call items go to the Recycle Bin (CI only) |
 | Read-only scan | a scan changes nothing; `-WhatIf` changes nothing |
 
@@ -115,4 +134,6 @@ An installed editor extension (a folder directly in `~\.vscode\extensions` and s
 - Restore points, reserved storage and folders only an administrator can read are not measured; the map shows them as not explained.
 - Clean items are deleted for good; only Your call items go to the Recycle Bin.
 - A cache an app keeps open is cleaned partly; the rest is listed.
+- After a move, open terminals and editors use the old location until restarted, and a tool with its own setting (an IDE's Gradle home) keeps using it.
+- Moving a WSL distribution needs a WSL with `wsl --manage --move`.
 - Tools Winnow starts are third-party programs; only their known update checks are disabled.

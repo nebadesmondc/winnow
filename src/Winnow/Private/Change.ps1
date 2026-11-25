@@ -1,5 +1,6 @@
-# The only delete primitive. Every path passes Assert-WinnowGuard first;
-# tests fail if any other file deletes, moves or runs robocopy.
+# Every change Winnow makes happens in this file: deleting, copying, creating
+# a move's destination, setting a user environment variable and moving a WSL
+# disk. Tests fail if any other file does any of these.
 
 function Remove-WinnowPath {
     <#
@@ -15,6 +16,8 @@ function Remove-WinnowPath {
         [Parameter(Mandatory)][string]$Path,
         [string[]]$AllowsInsideProject = @(),
         [switch]$Recycle,
+        # A move's destination, from its record: removed after an undo or a failed move.
+        [string]$MoveTarget,
         [switch]$SkipGuard   # test fixtures only
     )
 
@@ -35,7 +38,7 @@ function Remove-WinnowPath {
     } else {
         $canon = $null
         try {
-            $canon = Assert-WinnowGuard -Path $Path -AllowsInsideProject $AllowsInsideProject
+            $canon = Assert-WinnowGuard -Path $Path -AllowsInsideProject $AllowsInsideProject -MoveTarget $MoveTarget
         } catch {
             $outcome.Reason = $_.Exception.Message
             return $outcome
@@ -103,7 +106,7 @@ function Remove-WinnowPath {
     }
 
     if ($method -eq 'None' -and $isDir) {
-        $err = Invoke-WinnowMirrorPurge -Path $Path -AllowsInsideProject $AllowsInsideProject
+        $err = Invoke-WinnowMirrorPurge -Path $Path -AllowsInsideProject $AllowsInsideProject -MoveTarget $MoveTarget
         if ($err) { $reason = $err }
         if (-not (Test-WinnowPathExists -Path $Path)) { $method = 'RobocopyMirror' }
     }
@@ -144,12 +147,13 @@ function Invoke-WinnowMirrorPurge {
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
-        [string[]]$AllowsInsideProject = @()
+        [string[]]$AllowsInsideProject = @(),
+        [string]$MoveTarget
     )
 
     $target = $null
     try {
-        $target = Assert-WinnowGuard -Path $Path -AllowsInsideProject $AllowsInsideProject
+        $target = Assert-WinnowGuard -Path $Path -AllowsInsideProject $AllowsInsideProject -MoveTarget $MoveTarget
     } catch {
         return $_.Exception.Message
     }
@@ -270,4 +274,145 @@ function Clear-WinnowAttribute {
             }
         }
     }
+}
+
+function New-WinnowPrivateFolder {
+    <#
+    .SYNOPSIS
+    Creates the empty folder a move goes to, open only to the current user,
+    SYSTEM and Administrators. Returns its canonical path.
+
+    .NOTES
+    Permissions are set on this folder alone and everything copied in later
+    inherits them. Stripping permissions file by file (icacls /inheritance:r
+    /T) once left a moved WSL disk with an empty list that WSL could not open.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Source
+    )
+
+    $check = Test-WinnowMoveDestination -Path $Path -Source $Source
+    if (-not $check.Allowed) { throw "Winnow will not move anything to '$Path': $($check.Reason)" }
+    $canon = $check.Path
+    [void][System.IO.Directory]::CreateDirectory((ConvertTo-WinnowLongPath $canon))
+
+    $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @(
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+            (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')),      # SYSTEM
+            (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')))) { # Administrators
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $sid, 'FullControl', $inherit, 'None', 'Allow')))
+    }
+    $di = New-Object System.IO.DirectoryInfo($canon)
+    # An instance method on .NET Framework, an extension method on .NET.
+    if ($di.PSObject.Methods['SetAccessControl']) { $di.SetAccessControl($acl) }
+    else { [System.IO.FileSystemAclExtensions]::SetAccessControl($di, $acl) }
+    return $canon
+}
+
+function Copy-WinnowTree {
+    <#
+    .SYNOPSIS
+    Copies a folder's contents into another folder and removes nothing.
+    Returns $null, or why the copy is incomplete.
+
+    .NOTES
+    Data, attributes and timestamps are copied, not permissions, so the copy
+    takes its new folder's. Junctions are not followed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    $null = & robocopy.exe $Source $Destination /E /COPY:DAT /DCOPY:DAT /XJ /R:1 /W:1 /MT:8 /NFL /NDL /NJH /NJS /NC /NS /NP 2>&1
+    $code = $LASTEXITCODE
+    # Exit codes 8 and above mean some files were not copied.
+    if ($code -ge 8) { return "robocopy could not copy everything (exit code $code)" }
+    $from = Measure-WinnowTree -Path $Source
+    $to = Measure-WinnowTree -Path $Destination
+    if ($to.Files -lt $from.Files) {
+        return ('the copy holds {0:N0} files, the original {1:N0}' -f $to.Files, $from.Files)
+    }
+    return $null
+}
+
+function Remove-WinnowEmptyFolder {
+    # Removes a folder only when it is empty; anything inside keeps it.
+    param([Parameter(Mandatory)][string]$Path)
+    try { [System.IO.Directory]::Delete((ConvertTo-WinnowLongPath $Path), $false) } catch { }
+}
+
+# The tests write process variables instead, so a test run never changes the
+# user's environment.
+$script:WinnowVariableTarget = 'User'
+
+function Get-WinnowUserVariable {
+    param([Parameter(Mandatory)][string]$Name)
+    return [System.Environment]::GetEnvironmentVariable($Name, $script:WinnowVariableTarget)
+}
+
+function Set-WinnowUserVariable {
+    <#
+    .SYNOPSIS
+    Sets, or with $null removes, a user environment variable and this
+    session's copy. Only a variable some rule's Move names.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()][AllowEmptyString()]$Value,
+        # This session's value, when it differs (an undo restores both as they were).
+        [AllowNull()][AllowEmptyString()]$ProcessValue
+    )
+
+    $allowed = @(Import-WinnowRule | Where-Object { $_.Move } | ForEach-Object { $_.Move.Env })
+    if ($allowed -notcontains $Name) { throw "Winnow: '$Name' is not a variable any rule moves." }
+    if (-not $PSBoundParameters.ContainsKey('ProcessValue')) { $ProcessValue = $Value }
+    foreach ($pair in @(@($script:WinnowVariableTarget, $Value), @('Process', $ProcessValue))) {
+        # PowerShell passes $null to a .NET string as ''; .NET Framework then
+        # deletes the variable, but .NET 5+ stores it empty. NullString is a real null.
+        if ([string]::IsNullOrEmpty([string]$pair[1])) {
+            [System.Environment]::SetEnvironmentVariable($Name, [System.Management.Automation.Language.NullString]::Value, $pair[0])
+        } else {
+            [System.Environment]::SetEnvironmentVariable($Name, [string]$pair[1], $pair[0])
+        }
+    }
+}
+
+function Assert-WinnowWslName {
+    # wsl -d and --terminate keep quotes as part of the name, so names are
+    # passed bare and must be ones WSL itself allows.
+    param([Parameter(Mandatory)][string]$Name)
+    if ($Name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "Winnow: '$Name' is not a WSL distribution name Winnow can pass to wsl." }
+}
+
+function Stop-WinnowWslDistro {
+    # Stops one distribution, as wsl --terminate does; its processes end.
+    param([Parameter(Mandatory)][string]$Name)
+    Assert-WinnowWslName -Name $Name
+    $null = Invoke-WinnowProcess -Command 'wsl' -Arguments ('--terminate {0}' -f $Name) -TimeoutSec 60
+}
+
+function Move-WinnowWslDisk {
+    <#
+    .SYNOPSIS
+    Has WSL move a stopped distribution's disk into a folder. Returns $null,
+    or WSL's message when it failed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    Assert-WinnowWslName -Name $Name
+    $r = Invoke-WinnowProcess -Command 'wsl' -Arguments ('--manage {0} --move "{1}"' -f $Name, $Destination) -TimeoutSec 7200
+    if ($r.ExitCode -eq 0) { return $null }
+    if ($r.TimedOut) { return 'WSL did not finish within two hours' }
+    $msg = (@($r.Output, $r.Error) | Where-Object { $_ }) -join ' '
+    if (-not $msg) { $msg = "wsl exited with code $($r.ExitCode)" }
+    return $msg
 }

@@ -145,7 +145,9 @@ function Test-WinnowGuard {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$Path,
-        [string[]]$AllowsInsideProject = @()
+        [string[]]$AllowsInsideProject = @(),
+        # The destination a move record names; only that exact folder passes check 12.
+        [string]$MoveTarget
     )
 
     function _deny($reason, $canon) {
@@ -285,6 +287,12 @@ function Test-WinnowGuard {
     }
 
     # 12. Allow roots
+    if ($MoveTarget) {
+        $own = ConvertTo-WinnowFullPath $MoveTarget
+        if ($own -and $canon.Equals($own, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ Allowed = $true; Reason = 'a folder Winnow moved here'; Path = $canon }
+        }
+    }
     $matched = $null
     foreach ($a in $policy.AllowRoots) {
         if (Test-WinnowPathUnder -Path $canon -Root $a) {
@@ -308,11 +316,82 @@ function Assert-WinnowGuard {
     #>
     param(
         [Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$Path,
-        [string[]]$AllowsInsideProject = @()
+        [string[]]$AllowsInsideProject = @(),
+        [string]$MoveTarget
     )
-    $verdict = Test-WinnowGuard -Path $Path -AllowsInsideProject $AllowsInsideProject
+    $verdict = Test-WinnowGuard -Path $Path -AllowsInsideProject $AllowsInsideProject -MoveTarget $MoveTarget
     if (-not $verdict.Allowed) {
         throw "Winnow guard refused '$Path': $($verdict.Reason)"
     }
     return $verdict.Path
+}
+
+function Test-WinnowMoveDestination {
+    <#
+    .SYNOPSIS
+    Decides whether a folder may receive a move from $Source. Returns an
+    object, never throws.
+
+    .OUTPUTS
+    [pscustomobject] Allowed (bool), Reason (string), Path (canonical)
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
+        [Parameter(Mandatory)][string]$Source
+    )
+
+    function _deny($reason, $canon) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $reason; Path = $canon }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return (_deny 'empty path' $Path) }
+    if ($Path -notmatch '^[A-Za-z]:\\') { return (_deny 'not a full path on a local drive, such as D:\DevCache\npm' $Path) }
+    $canon = ConvertTo-WinnowFullPath $Path
+    if (-not $canon) { return (_deny 'path could not be canonicalised' $Path) }
+    $root = [System.IO.Path]::GetPathRoot($canon)
+    if ($canon.TrimEnd('\').Equals($root.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        return (_deny 'a drive root; name a folder on it' $canon)
+    }
+    if (-not (Test-WinnowFixedVolume -Path $canon)) { return (_deny 'not on a local fixed disk' $canon) }
+
+    $src = ConvertTo-WinnowFullPath $Source
+    if ($root.Equals([System.IO.Path]::GetPathRoot($src), [System.StringComparison]::OrdinalIgnoreCase)) {
+        return (_deny 'on the same drive; moving there frees nothing' $canon)
+    }
+
+    $policy = Get-WinnowGuardPolicy
+    foreach ($d in $policy.DenyRoots) {
+        if (Test-WinnowPathUnder -Path $canon -Root $d) { return (_deny "inside protected system location '$d'" $canon) }
+    }
+    foreach ($vr in $policy.DenyVolumeRelative) {
+        if (Test-WinnowPathUnder -Path $canon -Root (Join-Path $root $vr)) { return (_deny "inside protected location '$vr'" $canon) }
+    }
+    foreach ($u in $policy.UserContentRoots) {
+        if (Test-WinnowPathUnder -Path $canon -Root $u) { return (_deny "inside user content location '$u'" $canon) }
+    }
+    $leaf = [System.IO.Path]::GetFileName($canon)
+    foreach ($seg in @($canon.Substring($root.Length).Split('\'))) {
+        foreach ($cloud in @('OneDrive*', 'Dropbox*', '*Google Drive*', 'iCloudDrive', 'Nextcloud*')) {
+            if ($seg -like $cloud) { return (_deny "inside a cloud sync folder '$seg'" $canon) }
+        }
+    }
+
+    $probe = $canon
+    while ($probe -and -not $probe.TrimEnd('\').Equals($root.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ((Test-WinnowPathExists -Path $probe) -and (Test-WinnowReparsePoint -Path $probe)) {
+            return (_deny "reached via reparse point '$probe'" $canon)
+        }
+        $probe = [System.IO.Path]::GetDirectoryName($probe)
+    }
+
+    $lp = ConvertTo-WinnowLongPath $canon
+    if ([System.IO.File]::Exists($lp)) { return (_deny "'$leaf' is a file" $canon) }
+    if ([System.IO.Directory]::Exists($lp)) {
+        $any = $false
+        try { foreach ($e in [System.IO.Directory]::EnumerateFileSystemEntries($lp)) { $any = $true; break } }
+        catch { return (_deny "cannot be read: $($_.Exception.Message)" $canon) }
+        if ($any) { return (_deny 'the folder is not empty' $canon) }
+    }
+
+    return [pscustomobject]@{ Allowed = $true; Reason = 'an empty folder on another fixed disk'; Path = $canon }
 }

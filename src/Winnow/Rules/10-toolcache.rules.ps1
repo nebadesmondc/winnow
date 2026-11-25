@@ -18,6 +18,11 @@
         MinBytes    = 50MB
         Consequence = 'The next uv install re-downloads wheels. Network cost only; no Python installs, tools or credentials are affected.'
         Docs        = 'https://docs.astral.sh/uv/concepts/cache/'
+        Move        = @{
+            Id = 'uv'; Title = 'uv cache'; Env = 'UV_CACHE_DIR'
+            Verify = @{ Command = 'uv'; Args = 'cache dir' }
+            Note = 'uv cannot hard-link across drives, so it copies packages into environments and warns once per install; UV_LINK_MODE=copy silences the warning.'
+        }
     }
 
     # _cacache only; _npx has its own rule.
@@ -37,6 +42,11 @@
         MinBytes    = 50MB
         Consequence = 'The next npm install re-downloads packages. Globally installed CLIs live elsewhere and are untouched.'
         Docs        = 'https://docs.npmjs.com/cli/commands/npm-cache'
+        # The whole npm-cache folder moves, with _npx and logs.
+        Move        = @{
+            Id = 'npm'; Title = 'npm cache'; Env = 'NPM_CONFIG_CACHE'; Up = 1
+            Verify = @{ Command = 'npm'; Args = 'config get cache' }
+        }
     }
 
     @{
@@ -74,6 +84,10 @@
         MinBytes    = 25MB
         Consequence = 'The next pip install rebuilds or re-downloads wheels. Installed packages and virtual environments are untouched.'
         Docs        = 'https://pip.pypa.io/en/stable/cli/pip_cache/'
+        Move        = @{
+            Id = 'pip'; Title = 'pip cache'; Env = 'PIP_CACHE_DIR'
+            Verify = @{ Command = 'pip'; Args = 'cache dir' }
+        }
     }
 
     # Gradle caches and daemon only; never init.d, gradle.properties or wrapper.
@@ -88,6 +102,12 @@
         MinBytes    = 100MB
         Consequence = 'The next Gradle build re-downloads dependencies and re-runs its build cache. Slower first build, nothing lost.'
         Docs        = 'https://docs.gradle.org/current/userguide/dependency_caching.html'
+        # The whole Gradle home moves, so gradle.properties and init scripts come along.
+        Move        = @{
+            Id = 'gradle'; Title = 'Gradle home'; Env = 'GRADLE_USER_HOME'; Up = 1
+            RequiresClosed = @('java')
+            Note = 'An IDE with its own Gradle user home setting keeps using that folder.'
+        }
     }
 
     @{
@@ -128,6 +148,7 @@
         MinAgeDays  = 30
         Consequence = 'Browser engines must be reinstalled with `npx playwright install` before the next browser test run.'
         Docs        = 'https://playwright.dev/docs/browsers'
+        Move        = @{ Id = 'playwright'; Title = 'Playwright browsers'; Env = 'PLAYWRIGHT_BROWSERS_PATH' }
     }
 
     @{
@@ -142,6 +163,76 @@
         MinAgeDays  = 14
         Consequence = 'The next `pub get` or `flutter pub get` re-downloads packages.'
         Docs        = 'https://dart.dev/tools/pub/environment-variables'
+        # Tools from `dart pub global activate` run from bin, which is on PATH.
+        Move        = @{ Id = 'pub'; Title = 'Dart/Flutter pub cache'; Env = 'PUB_CACHE'; PathFolder = 'bin' }
+    }
+
+    @{
+        Id       = 'cache.nuget'
+        Title    = 'NuGet global packages'
+        Verdict  = 'Clean'
+        Resolve  = @(
+            @{ Type = 'Cli'; Command = 'dotnet'; Args = 'nuget locals global-packages --list'; TimeoutSec = 30 }
+            @{ Type = 'Env'; Name = 'NUGET_PACKAGES' }
+            @{ Type = 'Path'; Base = 'USERPROFILE'; Sub = '.nuget\packages' }
+        )
+        Reclaim  = @(
+            @{ Type = 'VendorCli'; Command = 'dotnet'; Args = 'nuget locals global-packages --clear' }
+            @{ Type = 'Delete' }
+        )
+        MinBytes       = 100MB
+        RequiresClosed = @('devenv')
+        Consequence    = 'The next restore re-downloads every package a .NET project uses. Projects and installed SDKs are untouched.'
+        Docs           = 'https://learn.microsoft.com/nuget/consume-packages/managing-the-global-packages-and-cache-folders'
+        Move           = @{
+            Id = 'nuget'; Title = 'NuGet packages'; Env = 'NUGET_PACKAGES'
+            Verify = @{ Command = 'dotnet'; Args = 'nuget locals global-packages --list' }
+            RequiresClosed = @('devenv', 'MSBuild', 'VBCSCompiler')
+        }
+    }
+
+    @{
+        Id       = 'cache.go.mod'
+        Title    = 'Go module cache'
+        Verdict  = 'Clean'
+        Resolve  = @(
+            @{ Type = 'Cli'; Command = 'go'; Args = 'env GOMODCACHE'; TimeoutSec = 20 }
+            @{ Type = 'Env'; Name = 'GOMODCACHE' }
+            @{ Type = 'Path'; Base = 'USERPROFILE'; Sub = 'go\pkg\mod' }
+        )
+        Reclaim  = @(
+            @{ Type = 'VendorCli'; Command = 'go'; Args = 'clean -modcache' }
+            @{ Type = 'Delete' }
+        )
+        MinBytes    = 100MB
+        Consequence = 'The next go build or go mod download re-downloads modules. Programs installed with go install are untouched.'
+        Docs        = 'https://go.dev/ref/mod#module-cache'
+        Move        = @{
+            Id = 'go-mod'; Title = 'Go module cache'; Env = 'GOMODCACHE'
+            Verify = @{ Command = 'go'; Args = 'env GOMODCACHE' }
+        }
+    }
+
+    @{
+        Id       = 'cache.go.build'
+        Title    = 'Go build cache'
+        Verdict  = 'Clean'
+        Resolve  = @(
+            @{ Type = 'Cli'; Command = 'go'; Args = 'env GOCACHE'; TimeoutSec = 20 }
+            @{ Type = 'Env'; Name = 'GOCACHE' }
+            @{ Type = 'Path'; Base = 'LOCALAPPDATA'; Sub = 'go-build' }
+        )
+        Reclaim  = @(
+            @{ Type = 'VendorCli'; Command = 'go'; Args = 'clean -cache' }
+            @{ Type = 'Delete' }
+        )
+        MinBytes    = 100MB
+        Consequence = 'The next go build compiles everything again: slower once, nothing lost.'
+        Docs        = 'https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching'
+        Move        = @{
+            Id = 'go-build'; Title = 'Go build cache'; Env = 'GOCACHE'
+            Verify = @{ Command = 'go'; Args = 'env GOCACHE' }
+        }
     }
 
     @{

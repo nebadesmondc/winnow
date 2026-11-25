@@ -1,5 +1,5 @@
-# Module loader. Only Public functions are exported; the delete primitive
-# stays private.
+# Module loader. Only Public functions are exported; the functions that
+# change anything stay private.
 
 Set-StrictMode -Version 1.0
 
@@ -21,14 +21,15 @@ if (-not ('Winnow.SpaceWalker' -as [type])) {
 
 $privateOrder = @(
     'Common.ps1'        # path normalisation, sizes, environment roots, CLI runner
-    'Guard.ps1'         # the denylist - must load before Remove-Safely
+    'Guard.ps1'         # the denylist - must load before Change
     'Measure-Tree.ps1'  # sizing on top of the native walker
     'Interlock.ps1'     # running processes, in-flight updates, sentinel scan
-    'Remove-Safely.ps1' # the ONLY delete primitive in the codebase
+    'Change.ps1'        # the ONLY file that changes anything
     'Discovery.ps1'     # tool locations, installed programs
     'Detectors.ps1'     # detectors that find items by name and layout
     'SystemFiles.ps1'   # pagefile and hibernation file
     'VirtualDisks.ps1'  # WSL, Docker and other virtual machine disks
+    'Move.ps1'          # what can move, and moving it
     'StaleVersions.ps1' # older app versions kept after updates
     'Finding.ps1'       # findings and verdicts
     'SpaceMap.ps1'      # drive walk and the space map

@@ -14,7 +14,28 @@ $script:WinnowRuleDefaults = @{
     AllowsInsideProject = @()
     Steps               = @()
     Docs                = $null
+    Move                = $null
     Enabled             = $true
+}
+
+# Variables a Move may never name; Windows and every program depend on them.
+$script:WinnowReservedVariables = @(
+    'PATH', 'PATHEXT', 'PSModulePath', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+    'HOME', 'HOMEDRIVE', 'HOMEPATH', 'ComSpec', 'SystemRoot', 'SystemDrive', 'windir',
+    'ProgramData', 'ProgramFiles', 'ALLUSERSPROFILE', 'PUBLIC', 'USERNAME', 'OS'
+)
+
+function Test-WinnowMoveSpec {
+    # Why a rule's Move block is invalid, or $null.
+    param($Move)
+    if ($Move -isnot [hashtable]) { return 'Move must be a hashtable' }
+    foreach ($k in @('Id', 'Title', 'Env')) {
+        if (-not $Move.ContainsKey($k) -or [string]::IsNullOrWhiteSpace([string]$Move[$k])) { return "Move has no $k" }
+    }
+    if ($Move.Id -notmatch '^[a-z0-9][a-z0-9.-]*$') { return "Move id '$($Move.Id)' must be lower-case letters, digits, dots and dashes" }
+    if ($Move.Env -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { return "'$($Move.Env)' is not a variable name" }
+    if ($script:WinnowReservedVariables -contains $Move.Env) { return "Move may not change '$($Move.Env)'" }
+    return $null
 }
 
 function Import-WinnowRule {
@@ -62,6 +83,13 @@ function Import-WinnowRule {
             if ($seen.ContainsKey($r.Id)) {
                 Write-Warning "Winnow: duplicate rule id '$($r.Id)' in '$($pack.Name)' was skipped."
                 continue
+            }
+            if ($r.ContainsKey('Move') -and $r.Move) {
+                $bad = Test-WinnowMoveSpec -Move $r.Move
+                if ($bad) {
+                    Write-Warning "Winnow: rule '$($r.Id)' was skipped: $bad."
+                    continue
+                }
             }
             if (-not $r.ContainsKey('Title')) { $r.Title = $r.Id }
 
@@ -166,10 +194,13 @@ function Invoke-WinnowScan {
             }
         }
     }
+    $movable = @()
+    try { $movable = @(Get-WinnowMovable -Rules $rules -Resolved $resolved -Findings $findings -Walk $walk -DriveRoot $driveRoot) }
+    catch { $ruleErrors.Add([pscustomobject]@{ RuleId = 'move'; Message = $_.Exception.Message }) }
     if (-not $NoProgress) { Write-Progress -Activity 'Winnow' -Completed }
 
     $report = [pscustomobject]@{
-        Schema      = 'winnow/report/2'
+        Schema      = 'winnow/report/3'
         RunId       = $runId
         StartedUtc  = $started.ToUniversalTime()
         DurationSec = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
@@ -181,6 +212,7 @@ function Invoke-WinnowScan {
         Drive       = $driveRoot
         Volumes     = @(Get-WinnowVolumeInfo)
         Findings    = $findings
+        Movable     = $movable
         Map         = (Get-WinnowSpaceMap -Walk $walk -Findings $findings -DriveRoot $driveRoot)
         Walk        = [pscustomobject]@{
             Seconds      = [math]::Round($walk.Seconds, 1)
